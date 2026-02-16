@@ -50,6 +50,7 @@ echo -e "\n>> RAW_APPENDIX" >> "$OUT"
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
   echo -e "${YELLOW}Внимание: скрипт запущен без sudo. На шагах с повышенными правами будет запрошен пароль администратора.${RESET}"
   echo "Подсказка: можно запустить сразу с sudo для более ровного прохождения шагов."
+  echo
   echo -e "\n>> PRIVILEGE_NOTICE" >> "$OUT"
   echo "run_mode=non_root; elevated_steps_require_sudo=yes" >> "$OUT"
 fi
