@@ -656,10 +656,11 @@ while :; do
 done
 
 TEST_DOMAIN_QUERY="$TEST_DOMAIN"
+IDN_PUNY=""
 if printf '%s' "$TEST_DOMAIN" | LC_ALL=C grep -q '[^ -~]'; then
   if command -v python3 >/dev/null 2>&1; then
     IDN_PUNY="$(python3 -c 'import sys; print(sys.argv[1].encode("idna").decode("ascii"))' "$TEST_DOMAIN" 2>/dev/null || true)"
-    if [ -n "$IDN_PUNY" ]; then
+    if [ -n "${IDN_PUNY:-}" ]; then
       TEST_DOMAIN_QUERY="$IDN_PUNY"
       echo
       echo -e "${CYAN}IDN нормализация для DNS-запросов: $TEST_DOMAIN -> $TEST_DOMAIN_QUERY${RESET}"
@@ -714,7 +715,7 @@ if printf '%s' "$TEST_DOMAIN" | LC_ALL=C grep -q '[^ -~]'; then
 
     if command -v python3 >/dev/null 2>&1; then
       IDN_PUNY="$(python3 -c 'import sys; print(sys.argv[1].encode("idna").decode("ascii"))' "$TEST_DOMAIN" 2>/dev/null || true)"
-      if [ -n "$IDN_PUNY" ]; then
+      if [ -n "${IDN_PUNY:-}" ]; then
         TEST_DOMAIN_QUERY="$IDN_PUNY"
         echo
         echo -e "${CYAN}IDN нормализация после установки: $TEST_DOMAIN -> $TEST_DOMAIN_QUERY${RESET}"
