@@ -35,13 +35,24 @@ start_step_spinner() {
   local message="$1"
   [ -t 1 ] || return 0
   stop_step_spinner
+  local cols max_len display_message
+  cols="$(tput cols 2>/dev/null || echo 80)"
+  max_len=$((cols - 12))
+  if [ "$max_len" -lt 20 ]; then
+    max_len=20
+  fi
+  if [ "${#message}" -gt "$max_len" ]; then
+    display_message="${message:0:$((max_len - 3))}..."
+  else
+    display_message="$message"
+  fi
   (
     trap 'exit 0' TERM INT
     local i=0
     local frames='|/-\'
     while :; do
       i=$(( (i + 1) % 4 ))
-      printf "\r%s[%s] %s%s" "$DETAIL" "${frames:$i:1}" "$message" "$RESET"
+      printf "\r\033[2K%s[%s] %s%s" "$DETAIL" "${frames:$i:1}" "$display_message" "$RESET"
       sleep 0.2
     done
   ) &
@@ -59,7 +70,13 @@ stop_step_spinner() {
   fi
 }
 run_sudo() {
-  # Перед sudo останавливаем спиннер, чтобы не ломать строку Password:
+  # Если sudo уже авторизован, не трогаем спиннер.
+  if [ "${EUID:-$(id -u)}" -eq 0 ] || sudo -n true 2>/dev/null; then
+    sudo -n "$@"
+    return $?
+  fi
+
+  # Если нужен пароль, останавливаем спиннер, чтобы не ломать строку Password:
   stop_step_spinner
   if [ -t 1 ]; then
     printf "\n"
