@@ -10,6 +10,14 @@ CYAN=$'\033[36m'
 MAGENTA=$'\033[35m'
 DETAIL=$'\033[90m'
 RESET=$'\033[0m'
+
+# Read interactive prompts from TTY, even when script body comes from a pipe.
+if [ -r /dev/tty ]; then
+  exec 3</dev/tty
+else
+  exec 3<&0
+fi
+
 say_step() {
   printf "\n%s%s%s\n" "$CYAN" "$1" "$RESET"
 }
@@ -45,7 +53,7 @@ ask_yes_no() {
   # return 0 for yes, 1 for no; repeats until a valid answer is provided
   local prompt="$1" reply=""
   while :; do
-    read -r -p "$prompt [y/N]: " reply
+    read -r -u 3 -p "$prompt [y/N]: " reply
     case "${reply:-}" in
       y|Y|yes|YES) return 0 ;;
       n|N|no|NO|"") return 1 ;;
@@ -639,7 +647,7 @@ render_evidence_sections() {
 
 TEST_DOMAIN=""
 while :; do
-  read -r -p "Введите домен для проверки DNS: " INPUT_DOMAIN
+  read -r -u 3 -p "Введите домен для проверки DNS: " INPUT_DOMAIN
   INPUT_DOMAIN_TRIMMED="$(printf '%s' "${INPUT_DOMAIN:-}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
   if [ -z "$INPUT_DOMAIN_TRIMMED" ]; then
     echo "Домен не введен. Повторите ввод."
@@ -730,7 +738,7 @@ if printf '%s' "$TEST_DOMAIN" | LC_ALL=C grep -q '[^ -~]'; then
       echo
       echo "Авто-конвертация IDN недоступна."
       echo "Рекомендуется ввести punycode-домен (например xn--...)."
-      read -r -p "Введите punycode для DNS-запросов (Enter = оставить исходный): " MANUAL_PUNY
+      read -r -u 3 -p "Введите punycode для DNS-запросов (Enter = оставить исходный): " MANUAL_PUNY
       MANUAL_PUNY_TRIMMED="$(printf '%s' "${MANUAL_PUNY:-}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
       if [ -n "$MANUAL_PUNY_TRIMMED" ]; then
         TEST_DOMAIN_QUERY="$MANUAL_PUNY_TRIMMED"
