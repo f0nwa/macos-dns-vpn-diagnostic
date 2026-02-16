@@ -30,14 +30,13 @@
 
 `<user>_<host>_dns_diag_<YYYYMMDD_HHMMSS>.txt`
 
-В отчете есть ключевые секции:
+В отчете есть ключевые секции, на которые стоит смотреть в первую очередь:
 
-- `DNS_ONLY_RESULT`
-- `E2E_RESULT`
-- `PRIMARY_CLASSIFICATION`
-- `EXEC_SUMMARY`
-- `EVIDENCE_MATRIX`
-- `Возможные причины проблем с DNS`
+- `DNS_ONLY_RESULT` - что с DNS по серверам и системному резолверу.
+- `E2E_RESULT` - где ломается цепочка (resolve/connect/tls/http).
+- `PRIMARY_CLASSIFICATION` - итоговая классификация и вероятный слой проблемы.
+- `EXEC_SUMMARY` и `EVIDENCE_MATRIX` - топ гипотез, уверенность и следующие проверки.
+- `Возможные причины проблем с DNS` — человекочитаемый список вероятных причин.
 
 ## Требования
 
