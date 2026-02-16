@@ -9,9 +9,10 @@ set -u
 CYAN=$'\033[36m'
 MAGENTA=$'\033[35m'
 DETAIL=$'\033[90m'
+YELLOW=$'\033[33m'
 RESET=$'\033[0m'
 
-# Read interactive prompts from TTY, even when script body comes from a pipe.
+# Читаем интерактивные ответы из TTY, даже если скрипт запускается из pipe.
 if [ -r /dev/tty ]; then
   exec 3</dev/tty
 else
@@ -46,11 +47,18 @@ OUT="$(pwd)/${USER_TAG}_${HOST_TAG}_dns_diag_${TS_TAG}.txt"
 echo ">> DNS+VPN/Прокси Диагностика Полная ($(date))" > "$OUT"
 echo -e "\n>> RAW_APPENDIX" >> "$OUT"
 
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+  echo -e "${YELLOW}Внимание: скрипт запущен без sudo. На шагах с повышенными правами будет запрошен пароль администратора.${RESET}"
+  echo "Подсказка: можно запустить сразу с sudo для более ровного прохождения шагов."
+  echo -e "\n>> PRIVILEGE_NOTICE" >> "$OUT"
+  echo "run_mode=non_root; elevated_steps_require_sudo=yes" >> "$OUT"
+fi
+
 CAUSES=()
 add_cause() { CAUSES+=("$1"); }
 
 ask_yes_no() {
-  # return 0 for yes, 1 for no; repeats until a valid answer is provided
+  # Возвращает 0 для yes и 1 для no; повторяет запрос до корректного ответа.
   local prompt="$1" reply=""
   while :; do
     read -r -u 3 -p "$prompt [y/N]: " reply
@@ -98,8 +106,8 @@ escape_ere() {
 }
 
 dig_probe() {
-  # stdout: result|reason|answers
-  # result: ok|fail ; reason: NOERROR|NODATA|NXDOMAIN|SERVFAIL|REFUSED|TIMEOUT|UNKNOWN
+  # Вывод в stdout: result|reason|answers
+  # result: ok|fail; reason: NOERROR|NODATA|NXDOMAIN|SERVFAIL|REFUSED|TIMEOUT|UNKNOWN
   local domain="$1" rr="$2" server="${3:-}" out status answer
   if [ -n "$server" ]; then
     out="$(dig +time=2 +tries=1 +noall +comments +answer "$domain" "$rr" @"$server" 2>&1)"
@@ -125,7 +133,7 @@ dig_probe() {
 }
 
 nslookup_probe() {
-  # stdout: result|reason|answers
+  # Вывод в stdout: result|reason|answers
   local domain="$1" server="${2:-}" out
   if [ -n "$server" ]; then
     out="$(nslookup -timeout=2 "$domain" "$server" 2>&1 || true)"
@@ -484,7 +492,7 @@ render_dual_mode_sections() {
 
 HYPOTHESES=()
 add_hypothesis() {
-  # score|layer|symptom|evidence|impact|next_check
+  # Поля: score|layer|symptom|evidence|impact|next_check
   HYPOTHESES+=("$1|$2|$3|$4|$5|$6")
 }
 
@@ -780,7 +788,7 @@ fi
 say_step "3/12 Сетевые расширения VPN/Прокси"
 say_step_detail "Проверяем neagent (если доступен)"
 say_step_detail "Снимаем systemextensionsctl list"
-# 3. NetworkExtension
+# 3. Сетевые расширения (NetworkExtension)
 echo -e "\n>> Сетевые расширения VPN/Прокси" >> "$OUT"
 if command -v neagent >/dev/null 2>&1; then
   neagent list >> "$OUT" 2>&1
@@ -799,7 +807,7 @@ pgrep -ai "$VPN_PROCS|neagent|utun|pfctl|socketfilterfw" >> "$OUT" 2>&1 || true
 
 say_step "5/12 Службы запуска"
 say_step_detail "Проверяем launchctl и plist сервисы VPN/Proxy"
-# 5. Launch plist ВСЕХ клиентов
+# 5. Launch plist всех клиентов
 LAUNCH_LIST="happ|ngate|cryptopro|xray|v2ray|qv2ray|clash|clashx|shadow|quantumult|surge|loon|stash|sing|nekoray|kitsunebi|v2box|napster|mosdns|dnscrypt|cloudflared|adguard|nextdns|smartdns|stubby|unbound|coredns|outline|wireguard|tailscale|headscale|mullvad|proton|expressvpn|nord|surfshark|pia|privateinternetaccess|ivpn|windscribe|purevpn|vypr|cyberghost|tunnelbear|astrill|hotspotshield|hma|openvpn|viscosity|tunnelblick|shimo|vpntracker|forticlient|paloalto|globalprotect|pulse|anyconnect|cisco|checkpoint|snx|sophos|sonicwall|zerotier|netbird|privoxy|polipo|3proxy|dante|tinyproxy|squid|mitmproxy|proxifier|proxychains|proxyswitcher|socketfilterfw|littlesnitch|lulu|tripmode|murus|icefloor|goodbyedpi|zapret|antizapret|stunnel|obfs4|meek|snowflake|tor|psiphon|safing|portmaster|unblockpro"
 echo -e "\n>> Службы запуска (launchd) VPN/Прокси" >> "$OUT"
 launchctl list 2>/dev/null | grep -iE "$LAUNCH_LIST" >> "$OUT"
@@ -831,7 +839,7 @@ find ~/Library/Preferences ~/Library/Application\ Support ~/Library/Caches /Appl
 say_step "8/12 Локальные слушатели портов"
 say_step_detail "Проверяем, кто держит /dev/pf"
 say_step_detail "Проверяем TCP LISTEN и UDP сокеты DNS/Proxy портов"
-# 8. lsof PF + порты proxy
+# 8. lsof PF + порты прокси
 echo -e "\n>> /dev/pf пользователи" >> "$OUT"
 sudo lsof /dev/pf 2>/dev/null | head -10 >> "$OUT"
 echo -e "\n>> Прокси/DNS TCP порты (LISTEN)" >> "$OUT"
@@ -858,7 +866,7 @@ done < <(networksetup -listallnetworkservices 2>/dev/null | sed '1d')
 say_step "10/12 Логи DNS резолвера и сетевых расширений"
 say_step_detail "Фильтрованные логи mDNSResponder (query/fail/timeout)"
 say_step_detail "Фильтрованные логи NetworkExtension (dns/proxy/tunnel/fail)"
-# 10. Логи DNS резолвера и NetworkExtension
+# 10. Логи DNS-резолвера и NetworkExtension
 echo -e "\n>> mDNSResponder логи (3м)" >> "$OUT"
 log show --style compact --predicate 'process == "mDNSResponder" AND (eventMessage CONTAINS[c] "query" OR eventMessage CONTAINS[c] "fail" OR eventMessage CONTAINS[c] "timeout" OR eventMessage CONTAINS[c] "nxdomain" OR eventMessage CONTAINS[c] "servfail")' --last 3m | head -500 >> "$OUT" 2>&1
 echo -e "\n>> Логи сетевых расширений (3м)" >> "$OUT"
@@ -1216,7 +1224,6 @@ fi
 
 GREEN=$'\033[32m'
 RED=$'\033[31m'
-YELLOW=$'\033[33m'
 if [ "$DNS_ONLY_VERDICT" = "PASS" ] && [ "$E2E_VERDICT" = "PASS" ]; then
   echo
   echo -e "${GREEN}ТЕСТ УСПЕШНО ПРОЙДЕН: хост доступен, TLS и HTTP в норме${RESET}"
