@@ -20,10 +20,54 @@ else
 fi
 
 say_step() {
+  flush_step_details
   printf "\n%s%s%s\n" "$CYAN" "$1" "$RESET"
 }
 say_step_detail() {
-  printf "  %s- %s%s\n" "$DETAIL" "$1" "$RESET"
+  local msg="$1"
+  STEP_DETAILS+=("$msg")
+  start_step_spinner "$msg"
+}
+
+STEP_DETAILS=()
+SPINNER_PID=""
+start_step_spinner() {
+  local message="$1"
+  [ -t 1 ] || return 0
+  stop_step_spinner
+  (
+    trap 'exit 0' TERM INT
+    local i=0
+    local frames='|/-\'
+    while :; do
+      i=$(( (i + 1) % 4 ))
+      printf "\r%s[%s] %s%s" "$DETAIL" "${frames:$i:1}" "$message" "$RESET"
+      sleep 0.2
+    done
+  ) &
+  SPINNER_PID=$!
+}
+stop_step_spinner() {
+  if [ -n "${SPINNER_PID:-}" ] && kill -0 "$SPINNER_PID" 2>/dev/null; then
+    kill "$SPINNER_PID" 2>/dev/null || true
+    wait "$SPINNER_PID" 2>/dev/null || true
+  fi
+  SPINNER_PID=""
+  if [ -t 1 ]; then
+    # Очищаем всю текущую строку целиком независимо от длины.
+    printf "\r\033[2K"
+  fi
+}
+flush_step_details() {
+  local item=""
+  if [ "${#STEP_DETAILS[@]}" -eq 0 ]; then
+    return
+  fi
+  stop_step_spinner
+  for item in "${STEP_DETAILS[@]}"; do
+    printf "  %s- %s%s\n" "$DETAIL" "$item" "$RESET"
+  done
+  STEP_DETAILS=()
 }
 
 printf "%s" "$CYAN"
@@ -1222,6 +1266,8 @@ else
     echo "- $c" >> "$OUT"
   done
 fi
+
+flush_step_details
 
 GREEN=$'\033[32m'
 RED=$'\033[31m'
