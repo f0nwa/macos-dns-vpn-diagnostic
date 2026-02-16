@@ -72,10 +72,10 @@ chmod +x /tmp/macos-dns-test.sh
 bash /tmp/macos-dns-test.sh
 ```
 
-Быстрый one-liner (менее безопасно, т.к. сразу выполнение):
+Быстрый one-liner (сразу выполнение):
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/f0nwa/macos-dns-vpn-diagnostic/main/macos-dns-test.sh" | bash
+bash <(curl -fsSL "https://raw.githubusercontent.com/f0nwa/macos-dns-vpn-diagnostic/main/macos-dns-test.sh")
 ```
 
 Совет: для стабильности указывайте `tag` или конкретный commit SHA вместо плавающей ветки.
