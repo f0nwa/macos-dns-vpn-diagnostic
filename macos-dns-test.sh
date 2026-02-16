@@ -58,6 +58,40 @@ stop_step_spinner() {
     printf "\r\033[2K"
   fi
 }
+run_sudo() {
+  # Перед sudo останавливаем спиннер, чтобы не ломать строку Password:
+  stop_step_spinner
+  if [ -t 1 ]; then
+    printf "\n"
+  fi
+  sudo "$@"
+}
+SUDO_KEEPALIVE_PID=""
+stop_sudo_keepalive() {
+  if [ -n "${SUDO_KEEPALIVE_PID:-}" ] && kill -0 "$SUDO_KEEPALIVE_PID" 2>/dev/null; then
+    kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+    wait "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+  fi
+  SUDO_KEEPALIVE_PID=""
+}
+start_sudo_keepalive() {
+  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+    return 0
+  fi
+  echo
+  echo "Введите локальный пароль администратора для доступа в систему..."
+  if sudo -v; then
+    (
+      while :; do
+        sudo -n true 2>/dev/null || exit 0
+        sleep 50
+      done
+    ) &
+    SUDO_KEEPALIVE_PID=$!
+  else
+    echo -e "${YELLOW}Не удалось получить sudo-сессию заранее. Возможны дополнительные запросы пароля в ходе диагностики.${RESET}"
+  fi
+}
 flush_step_details() {
   local item=""
   if [ "${#STEP_DETAILS[@]}" -eq 0 ]; then
@@ -69,6 +103,7 @@ flush_step_details() {
   done
   STEP_DETAILS=()
 }
+trap 'stop_sudo_keepalive' EXIT INT TERM
 
 printf "%s" "$CYAN"
 cat <<'EOF'
@@ -92,8 +127,8 @@ echo ">> DNS+VPN/Прокси Диагностика Полная ($(date))" > "
 echo -e "\n>> RAW_APPENDIX" >> "$OUT"
 
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-  echo -e "${YELLOW}Внимание: скрипт запущен без sudo. На шагах с повышенными правами будет запрошен пароль администратора.${RESET}"
-  echo "Подсказка: можно запустить сразу с sudo для более ровного прохождения шагов."
+  echo -e "${YELLOW}Скрипт запущен без sudo. После ввода домена будет запрошен пароль.${RESET}"
+  echo -e "${YELLOW}Подсказка: можно запустить сразу с sudo для более ровного прохождения шагов.${RESET}"
   echo
   echo -e "\n>> PRIVILEGE_NOTICE" >> "$OUT"
   echo "run_mode=non_root; elevated_steps_require_sudo=yes" >> "$OUT"
@@ -803,6 +838,8 @@ if printf '%s' "$TEST_DOMAIN" | LC_ALL=C grep -q '[^ -~]'; then
   fi
 fi
 
+start_sudo_keepalive
+
 say_step "1/12 Сбор DNS настроек (scutil)"
 say_step_detail "Снимаем единый snapshot: scutil --dns"
 say_step_detail "Снимаем системные прокси: scutil --proxy"
@@ -821,10 +858,10 @@ say_step_detail "Читаем pfctl: info / anchors / rules"
 say_step_detail "Фиксируем факт: PF включен или нет"
 # 2. PF полный
 echo -e "\n>> PF: статус, анкоры, правила" >> "$OUT"
-sudo pfctl -s info >> "$OUT" 2>&1
-sudo pfctl -a all -s info >> "$OUT" 2>&1
-sudo pfctl -s rules >> "$OUT" 2>&1
-if sudo pfctl -s info 2>/dev/null | grep -q "Status: Enabled"; then
+run_sudo pfctl -s info >> "$OUT" 2>&1
+run_sudo pfctl -a all -s info >> "$OUT" 2>&1
+run_sudo pfctl -s rules >> "$OUT" 2>&1
+if run_sudo pfctl -s info 2>/dev/null | grep -q "Status: Enabled"; then
   emit_fact policy pf_enabled yes "pfctl -s info"
 else
   emit_fact policy pf_enabled no "pfctl -s info"
@@ -863,9 +900,9 @@ say_step_detail "Короткий capture DNS/mDNS/LLMNR: tcpdump"
 say_step_detail "Ищем PF block события за 1 час"
 # 6. DNS трафик + блоки
 echo -e "\n>> DNS трафик (30 пакетов)" >> "$OUT"
-sudo tcpdump -i any -n '(udp or tcp) and (port 53 or port 5353 or port 5355)' -c 30 2>/dev/null >> "$OUT" || echo "tcpdump: нет DNS/mDNS/LLMNR трафика" >> "$OUT"
+run_sudo tcpdump -i any -n '(udp or tcp) and (port 53 or port 5353 or port 5355)' -c 30 2>/dev/null >> "$OUT" || echo "tcpdump: нет DNS/mDNS/LLMNR трафика" >> "$OUT"
 echo -e "\n>> PF блоки (1ч)" >> "$OUT"
-PF_BLOCKS="$(sudo log show --style compact --predicate 'subsystem == "com.apple.pf"' --last 1h --info 2>/dev/null | grep -i block | head -15 || true)"
+PF_BLOCKS="$(run_sudo log show --style compact --predicate 'subsystem == "com.apple.pf"' --last 1h --info 2>/dev/null | grep -i block | head -15 || true)"
 if [ -n "$PF_BLOCKS" ]; then
   printf '%s\n' "$PF_BLOCKS" >> "$OUT"
   emit_fact policy pf_blocks_recent yes "log show com.apple.pf"
@@ -886,11 +923,11 @@ say_step_detail "Проверяем, кто держит /dev/pf"
 say_step_detail "Проверяем TCP LISTEN и UDP сокеты DNS/Proxy портов"
 # 8. lsof PF + порты прокси
 echo -e "\n>> /dev/pf пользователи" >> "$OUT"
-sudo lsof /dev/pf 2>/dev/null | head -10 >> "$OUT"
+run_sudo lsof /dev/pf 2>/dev/null | head -10 >> "$OUT"
 echo -e "\n>> Прокси/DNS TCP порты (LISTEN)" >> "$OUT"
-sudo lsof -nP -sTCP:LISTEN -iTCP:53 -iTCP:5353 -iTCP:1080 -iTCP:8080 -iTCP:40000-50000 2>/dev/null >> "$OUT"
+run_sudo lsof -nP -sTCP:LISTEN -iTCP:53 -iTCP:5353 -iTCP:1080 -iTCP:8080 -iTCP:40000-50000 2>/dev/null >> "$OUT"
 echo -e "\n>> DNS UDP сокеты" >> "$OUT"
-sudo lsof -nP -iUDP:53 -iUDP:5353 -iUDP:5355 2>/dev/null >> "$OUT"
+run_sudo lsof -nP -iUDP:53 -iUDP:5353 -iUDP:5355 2>/dev/null >> "$OUT"
 
 say_step "9/12 Сетевые сервисы и прокси"
 say_step_detail "Обходим network services"
@@ -1166,8 +1203,8 @@ else
   emit_fact interceptor system_proxy_enabled no "scutil --proxy"
 fi
 
-if sudo pfctl -s info 2>/dev/null | grep -q "Status: Enabled"; then
-  if sudo pfctl -s rules 2>/dev/null | grep -Eiq '(^|[[:space:]])(block|drop)[[:space:]]'; then
+if run_sudo pfctl -s info 2>/dev/null | grep -q "Status: Enabled"; then
+  if run_sudo pfctl -s rules 2>/dev/null | grep -Eiq '(^|[[:space:]])(block|drop)[[:space:]]'; then
     add_cause "PF включен и есть block/drop правила: возможна фильтрация DNS"
     emit_fact policy pf_block_rules yes "pfctl -s rules"
   else
@@ -1176,8 +1213,8 @@ if sudo pfctl -s info 2>/dev/null | grep -q "Status: Enabled"; then
 fi
 
 DNS_LISTEN="$({
-  sudo lsof -nP -sTCP:LISTEN -iTCP:53 2>/dev/null | awk 'NR>1 {print $1}'
-  sudo lsof -nP -iUDP:53 2>/dev/null | awk 'NR>1 {print $1}'
+  run_sudo lsof -nP -sTCP:LISTEN -iTCP:53 2>/dev/null | awk 'NR>1 {print $1}'
+  run_sudo lsof -nP -iUDP:53 2>/dev/null | awk 'NR>1 {print $1}'
 } | sort -u | grep -v mDNSResponder || true)"
 if [ -n "$DNS_LISTEN" ]; then
   add_cause "Локальные процессы слушают 53 порт: $DNS_LISTEN"
