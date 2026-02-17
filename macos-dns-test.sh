@@ -202,6 +202,47 @@ escape_ere() {
   printf '%s' "$1" | sed 's/[][(){}.^$*+?|\\]/\\&/g'
 }
 
+PYTHON3_SKIP_REASON=""
+DETECTED_PYTHON3_BIN=""
+detect_primary_python3_bin() {
+  # Базовый путь: "обычный" python3 из PATH.
+  # Для /usr/bin/python3 обязательно проверяем наличие CLT, чтобы не вызвать установщик.
+  local candidate=""
+  PYTHON3_SKIP_REASON=""
+  DETECTED_PYTHON3_BIN=""
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    PYTHON3_SKIP_REASON="python3_missing"
+    return 1
+  fi
+
+  candidate="$(command -v python3)"
+  if [ "$candidate" = "/usr/bin/python3" ] && ! xcode-select -p >/dev/null 2>&1; then
+    PYTHON3_SKIP_REASON="apple_stub_missing_clt"
+    return 1
+  fi
+
+  DETECTED_PYTHON3_BIN="$candidate"
+  return 0
+}
+
+detect_homebrew_python3_bin() {
+  # Фолбэк: python3, установленный через Homebrew.
+  local candidate=""
+  PYTHON3_SKIP_REASON=""
+  DETECTED_PYTHON3_BIN=""
+
+  for candidate in /opt/homebrew/bin/python3 /usr/local/bin/python3; do
+    if [ -x "$candidate" ]; then
+      DETECTED_PYTHON3_BIN="$candidate"
+      return 0
+    fi
+  done
+
+  PYTHON3_SKIP_REASON="homebrew_python3_missing"
+  return 1
+}
+
 dig_probe() {
   # Вывод в stdout: result|reason|answers
   # result: ok|fail; reason: NOERROR|NODATA|NXDOMAIN|SERVFAIL|REFUSED|TIMEOUT|UNKNOWN
@@ -771,21 +812,29 @@ done
 TEST_DOMAIN_QUERY="$TEST_DOMAIN"
 IDN_PUNY=""
 if printf '%s' "$TEST_DOMAIN" | LC_ALL=C grep -q '[^ -~]'; then
-  if command -v python3 >/dev/null 2>&1; then
-    IDN_PUNY="$(python3 -c 'import sys; print(sys.argv[1].encode("idna").decode("ascii"))' "$TEST_DOMAIN" 2>/dev/null || true)"
+  PYTHON3_BIN=""
+  if detect_primary_python3_bin; then
+    PYTHON3_BIN="$DETECTED_PYTHON3_BIN"
+    IDN_PUNY="$("$PYTHON3_BIN" -c 'import sys; print(sys.argv[1].encode("idna").decode("ascii"))' "$TEST_DOMAIN" 2>/dev/null || true)"
     if [ -n "${IDN_PUNY:-}" ]; then
       TEST_DOMAIN_QUERY="$IDN_PUNY"
       echo
       echo -e "${CYAN}IDN нормализация для DNS-запросов: $TEST_DOMAIN -> $TEST_DOMAIN_QUERY${RESET}"
-      emit_fact resolver idn_normalized yes "python3 idna"
+      emit_fact resolver idn_normalized yes "python3 idna (${PYTHON3_BIN})"
       emit_fact resolver dns_query_domain "$TEST_DOMAIN_QUERY" "idna"
     else
-      emit_fact resolver idn_normalized no "python3 idna"
+      emit_fact resolver idn_normalized no "python3 idna (${PYTHON3_BIN})"
     fi
   else
     echo
-    echo -e "${CYAN}Обнаружен IDN-домен, но python3 не найден.${RESET}"
-    emit_fact resolver idn_normalized no "python3 missing"
+    if [ "$PYTHON3_SKIP_REASON" = "apple_stub_missing_clt" ]; then
+      echo -e "${CYAN}Обнаружен IDN-домен, но /usr/bin/python3 недоступен без Command Line Tools.${RESET}"
+      echo -e "${CYAN}Переходим на установку Homebrew + python3.${RESET}"
+      emit_fact resolver idn_normalized no "python3 apple stub skipped"
+    else
+      echo -e "${CYAN}Обнаружен IDN-домен, но python3 не найден.${RESET}"
+      emit_fact resolver idn_normalized no "python3 missing"
+    fi
     AUTO_INSTALL_PYTHON_WITH_BREW=no
 
     if ! command -v brew >/dev/null 2>&1; then
@@ -826,16 +875,18 @@ if printf '%s' "$TEST_DOMAIN" | LC_ALL=C grep -q '[^ -~]'; then
       emit_fact resolver python3_install_attempt unavailable "brew missing"
     fi
 
-    if command -v python3 >/dev/null 2>&1; then
-      IDN_PUNY="$(python3 -c 'import sys; print(sys.argv[1].encode("idna").decode("ascii"))' "$TEST_DOMAIN" 2>/dev/null || true)"
+    PYTHON3_BIN=""
+    if detect_homebrew_python3_bin; then
+      PYTHON3_BIN="$DETECTED_PYTHON3_BIN"
+      IDN_PUNY="$("$PYTHON3_BIN" -c 'import sys; print(sys.argv[1].encode("idna").decode("ascii"))' "$TEST_DOMAIN" 2>/dev/null || true)"
       if [ -n "${IDN_PUNY:-}" ]; then
         TEST_DOMAIN_QUERY="$IDN_PUNY"
         echo
         echo -e "${CYAN}IDN нормализация после установки: $TEST_DOMAIN -> $TEST_DOMAIN_QUERY${RESET}"
-        emit_fact resolver idn_normalized yes "python3 idna post-install"
+        emit_fact resolver idn_normalized yes "python3 idna post-install (${PYTHON3_BIN})"
         emit_fact resolver dns_query_domain "$TEST_DOMAIN_QUERY" "idna post-install"
       else
-        emit_fact resolver idn_normalized no "python3 idna post-install"
+        emit_fact resolver idn_normalized no "python3 idna post-install (${PYTHON3_BIN})"
       fi
     fi
 
