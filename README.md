@@ -51,16 +51,15 @@
 
 - macOS Tahoe 26.0
 
-## Запуск
-
-```bash
-chmod +x macos-dns-test.sh
-./macos-dns-test.sh
-```
-
 После запуска введите домен в формате `name.zone`.
 
 ## Запуск по сети через GitHub Raw
+
+Быстрый one-liner (сразу выполнение):
+
+```bash
+bash <(curl -fsSL "https://raw.githubusercontent.com/f0nwa/macos-dns-vpn-diagnostic/main/macos-dns-test.sh")
+```
 
 Рекомендуемый вариант (скачать, проверить, затем запустить):
 
@@ -71,13 +70,12 @@ chmod +x /tmp/macos-dns-test.sh
 bash /tmp/macos-dns-test.sh
 ```
 
-Быстрый one-liner (сразу выполнение):
+## Запуск
 
 ```bash
-bash <(curl -fsSL "https://raw.githubusercontent.com/f0nwa/macos-dns-vpn-diagnostic/main/macos-dns-test.sh")
+chmod +x macos-dns-test.sh
+./macos-dns-test.sh
 ```
-
-Совет: для стабильности указывайте `tag` или конкретный commit SHA вместо плавающей ветки.
 
 ## Важно
 
