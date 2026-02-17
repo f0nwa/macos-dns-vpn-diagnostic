@@ -51,8 +51,6 @@
 
 - macOS Tahoe 26.0
 
-После запуска введите домен в формате `name.zone`.
-
 ## Запуск по сети через GitHub Raw
 
 Быстрый one-liner (сразу выполнение):
@@ -76,6 +74,8 @@ bash /tmp/macos-dns-test.sh
 chmod +x macos-dns-test.sh
 ./macos-dns-test.sh
 ```
+
+После запуска введите домен в формате `name.zone`.
 
 ## Важно
 
