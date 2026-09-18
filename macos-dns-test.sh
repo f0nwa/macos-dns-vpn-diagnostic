@@ -1,10 +1,62 @@
 #!/bin/bash
 # Description: Полная диагностика DNS/VPN/Proxy на macOS с классификацией причин и e2e-проверкой.
 # Author: f0nwa
-# Last Modified: 2026-02-16
+# Last Modified: 2026-09-18
 
-clear
 set -u
+
+FLAG_DOMAIN=""
+FLAG_YES=0
+FLAG_OUTPUT=""
+FLAG_VERIFY_INTEGRITY=0
+for _arg in "$@"; do
+  case "$_arg" in
+    --domain=*) FLAG_DOMAIN="${_arg#--domain=}" ;;
+    --yes) FLAG_YES=1 ;;
+    --output=*) FLAG_OUTPUT="${_arg#--output=}" ;;
+    --verify-integrity) FLAG_VERIFY_INTEGRITY=1 ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: macos-dns-test.sh [--domain=<host>] [--yes] [--output=<path>] [--verify-integrity]
+
+  --domain=<host>       Пропустить интерактивный ввод, тестировать этот домен.
+  --yes                 Автоматически подтверждать все y/n запросы (в т.ч. установку Homebrew/python3).
+  --output=<path>       Писать отчёт в указанный файл вместо ./<user>_<host>_dns_diag_<ts>.txt.
+  --verify-integrity    Перед запуском сверить свой sha256 с checksums.txt из репозитория
+                        (требует локальный клон: scripts/integrity-lib.sh должен лежать
+                        рядом со скриптом; для one-liner "curl | bash" эта проверка
+                        недоступна, см. README).
+
+Без флагов скрипт работает как раньше, в интерактивном режиме.
+USAGE
+      exit 0
+      ;;
+    *)
+      echo "Неизвестный аргумент: $_arg (см. --help)" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [ "$FLAG_VERIFY_INTEGRITY" = "1" ]; then
+  _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+  if [ -n "$_self_dir" ] && [ -r "$_self_dir/scripts/integrity-lib.sh" ]; then
+    # shellcheck source=scripts/integrity-lib.sh
+    source "$_self_dir/scripts/integrity-lib.sh"
+    if ! dns_diag_verify_self "$_self_dir/macos-dns-test.sh"; then
+      echo "Проверка целостности не пройдена. Прерываю выполнение (--verify-integrity)." >&2
+      exit 1
+    fi
+    echo "Проверка целостности пройдена (checksums.txt)."
+  else
+    echo "Не найден scripts/integrity-lib.sh рядом со скриптом — --verify-integrity недоступен в этом режиме запуска (например, при curl | bash)." >&2
+    exit 1
+  fi
+fi
+
+if [ -t 1 ]; then
+  clear
+fi
 
 CYAN=$'\033[36m'
 MAGENTA=$'\033[35m'
@@ -137,7 +189,11 @@ printf "%s" "$RESET"
 USER_TAG="${USER:-user}"
 HOST_TAG="$(hostname -s 2>/dev/null || echo host)"
 TS_TAG="$(date +%Y%m%d_%H%M%S)"
-OUT="$(pwd)/${USER_TAG}_${HOST_TAG}_dns_diag_${TS_TAG}.txt"
+if [ -n "$FLAG_OUTPUT" ]; then
+  OUT="$FLAG_OUTPUT"
+else
+  OUT="$(pwd)/${USER_TAG}_${HOST_TAG}_dns_diag_${TS_TAG}.txt"
+fi
 echo ">> DNS+VPN/Прокси Диагностика Полная ($(date))" > "$OUT"
 echo -e "\n>> RAW_APPENDIX" >> "$OUT"
 
@@ -155,6 +211,10 @@ add_cause() { CAUSES+=("$1"); }
 ask_yes_no() {
   # Возвращает 0 для yes и 1 для no; повторяет запрос до корректного ответа.
   local prompt="$1" reply=""
+  if [ "$FLAG_YES" = "1" ]; then
+    echo "$prompt [y/N]: y (авто, --yes)"
+    return 0
+  fi
   while :; do
     read -r -u 3 -p "$prompt [y/N]: " reply
     case "${reply:-}" in
@@ -790,22 +850,31 @@ render_evidence_sections() {
 }
 
 TEST_DOMAIN=""
-while :; do
-  read -r -u 3 -p "Введите домен для проверки DNS: " INPUT_DOMAIN
-  INPUT_DOMAIN_TRIMMED="$(printf '%s' "${INPUT_DOMAIN:-}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-  if [ -z "$INPUT_DOMAIN_TRIMMED" ]; then
-    echo "Домен не введен. Повторите ввод."
-    continue
+if [ -n "$FLAG_DOMAIN" ]; then
+  INPUT_DOMAIN_TRIMMED="$(printf '%s' "$FLAG_DOMAIN" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  if [ -z "$INPUT_DOMAIN_TRIMMED" ] || ! printf '%s' "$INPUT_DOMAIN_TRIMMED" | grep -Eq '^[^.].*\..*[^.]$'; then
+    echo "Некорректный --domain: требуется формат вида name.zone" >&2
+    exit 2
   fi
-  if ! printf '%s' "$INPUT_DOMAIN_TRIMMED" | grep -Eq '^[^.].*\..*[^.]$'; then
-    echo "Некорректный домен: требуется формат вида name.zone (одна точка без меток недопустима)."
-    continue
-  fi
-  if [ -n "$INPUT_DOMAIN_TRIMMED" ]; then
-    TEST_DOMAIN="$INPUT_DOMAIN_TRIMMED"
-    break
-  fi
-done
+  TEST_DOMAIN="$INPUT_DOMAIN_TRIMMED"
+else
+  while :; do
+    read -r -u 3 -p "Введите домен для проверки DNS: " INPUT_DOMAIN
+    INPUT_DOMAIN_TRIMMED="$(printf '%s' "${INPUT_DOMAIN:-}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    if [ -z "$INPUT_DOMAIN_TRIMMED" ]; then
+      echo "Домен не введен. Повторите ввод."
+      continue
+    fi
+    if ! printf '%s' "$INPUT_DOMAIN_TRIMMED" | grep -Eq '^[^.].*\..*[^.]$'; then
+      echo "Некорректный домен: требуется формат вида name.zone (одна точка без меток недопустима)."
+      continue
+    fi
+    if [ -n "$INPUT_DOMAIN_TRIMMED" ]; then
+      TEST_DOMAIN="$INPUT_DOMAIN_TRIMMED"
+      break
+    fi
+  done
+fi
 
 TEST_DOMAIN_QUERY="$TEST_DOMAIN"
 IDN_PUNY=""
@@ -916,7 +985,7 @@ SCUTIL_DNS_RAW="$(scutil --dns 2>&1 || true)"
 printf '%s\n' "$SCUTIL_DNS_RAW" >> "$OUT"
 echo -e "\n>> scutil --proxy (прокси)" >> "$OUT"
 scutil --proxy >> "$OUT" 2>&1
-SCUTIL_NS_COUNT="$(printf '%s\n' "$SCUTIL_DNS_RAW" | awk '/nameserver\\[[0-9]+\\]/{c++} END{print c+0}')"
+SCUTIL_NS_COUNT="$(printf '%s\n' "$SCUTIL_DNS_RAW" | awk '/nameserver\[[0-9]+\]/{c++} END{print c+0}')"
 emit_fact resolver nameserver_count "$SCUTIL_NS_COUNT" "scutil --dns"
 
 say_step "2/12 PF: статус/анкоры/правила"
@@ -1030,7 +1099,7 @@ echo -e "\n>> DNS доступность ($TEST_DOMAIN)" >> "$OUT"
 if [ "$TEST_DOMAIN_QUERY" != "$TEST_DOMAIN" ]; then
   echo "DNS query label (IDN->ASCII): $TEST_DOMAIN_QUERY" >> "$OUT"
 fi
-DNS_SERVERS="$(printf '%s\n' "$SCUTIL_DNS_RAW" | awk '/nameserver\\[[0-9]+\\]/{print $3}' | sort -u)"
+DNS_SERVERS="$(printf '%s\n' "$SCUTIL_DNS_RAW" | awk '/nameserver\[[0-9]+\]/{print $3}' | sort -u)"
 if [ -z "$DNS_SERVERS" ]; then
   DNS_SERVERS="$(networksetup -listallnetworkservices 2>/dev/null | sed '1d' | while IFS= read -r svc; do
     [ -z "$svc" ] && continue

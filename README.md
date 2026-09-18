@@ -90,6 +90,54 @@ chmod +x macos-dns-test.sh
 - Причина запроса: ограничения приватности macOS (TCC) при обходе пользовательских директорий; это побочный системный диалог, а не обращение скрипта к Apple Music API.
 - Перед публикацией отчета проверьте файл и удалите чувствительные данные (внутренние IP, имена хостов, пути и т.д.).
 
+## Неинтерактивный режим
+
+Для автоматизации и тестов есть флаги:
+
+```bash
+./macos-dns-test.sh --domain=ya.ru --yes --output=/tmp/report.txt
+```
+
+- `--domain=<host>` — не спрашивать домен интерактивно.
+- `--yes` — автоматически отвечать "да" на все y/n запросы (в т.ч. установку Homebrew/python3 для IDN).
+- `--output=<path>` — писать отчёт в конкретный файл вместо `$(pwd)/<user>_<host>_dns_diag_<ts>.txt`.
+- `--verify-integrity` — перед запуском сверить свой sha256 с `checksums.txt` из репозитория (нужен локальный клон, не работает при `curl | bash`, см. ниже).
+
+Без флагов поведение полностью прежнее, интерактивное.
+
+## Разработка и тесты
+
+Тесты лежат в `tests/` и написаны на [bats-core](https://github.com/bats-core/bats-core):
+
+```bash
+brew install bats-core shellcheck
+shellcheck -S warning macos-dns-test.sh scripts/*.sh
+bats tests/*.bats
+```
+
+- `tests/regex_regression.bats` — регрессия на баг с двойным бэкслешем в regex разбора `scutil --dns` (см. историю коммитов).
+- `tests/hypotheses.bats` — движок гипотез (`build_hypotheses`/`confidence_label`) на синтетических наборах фактов.
+- `tests/cli_flags.bats` — неинтерактивный режим, включая полный прогон скрипта целиком.
+
+Тесты вытаскивают функции прямо из `macos-dns-test.sh` (`tests/lib/extract.bash`), а не дублируют их копией, — так тест всегда проверяет актуальный код.
+
+CI (`.github/workflows/ci.yml`) гоняет то же самое на `macos-latest` при каждом push/PR.
+
+### Git-хуки и проверка целостности (опционально)
+
+```bash
+./scripts/install-git-hooks.sh
+```
+
+Включает `.githooks/pre-commit`, который при коммите `macos-dns-test.sh`:
+
+1. обновляет `# Last Modified:` на сегодняшнюю дату;
+2. пересчитывает `checksums.txt` (`scripts/generate-checksums.sh`).
+
+`checksums.txt` используется флагом `--verify-integrity`: скрипт хэширует сам себя (sha256) и сверяет с опубликованной в репозитории записью — это защищает **локальный клон** от случайной порчи файла. Для строгой защиты от подмены на raw.githubusercontent.com (MITM) `scripts/integrity-lib.sh` поддерживает и `minisign`-подпись (`VERIFY_MODE=strict` + `DNS_DIAG_MINISIGN_PUBKEY`), но ключи подписи в этом репозитории пока не заведены.
+
+Важное ограничение: `--verify-integrity` требует, чтобы `scripts/integrity-lib.sh` лежал рядом со скриптом — то есть работает только при локальном клоне/скачивании репозитория, **не** при однострочном `curl | bash` из README (туда скачивается только сам `macos-dns-test.sh`).
+
 ## License
 
 MIT. См. файл `LICENSE`.

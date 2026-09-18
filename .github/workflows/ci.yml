@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  lint-and-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck and bats-core
+        run: |
+          brew install shellcheck bats-core
+
+      - name: ShellCheck
+        # Скрипт никогда раньше не проверялся линтером, поэтому первый проход
+        # намеренно смотрит только на warning+ (не на style/info), чтобы CI
+        # ловил реальные проблемы, а не требовал полного рефакторинга сразу.
+        # Ужесточать до полного набора проверок можно постепенно, отдельными PR.
+        run: |
+          shellcheck -S warning macos-dns-test.sh scripts/*.sh
+
+      - name: Run bats test suite
+        run: |
+          bats tests/*.bats

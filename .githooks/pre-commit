@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Устанавливается через scripts/install-git-hooks.sh (git config core.hooksPath .githooks).
+#
+# Если macos-dns-test.sh попал в коммит:
+#   1) обновляет строку "# Last Modified: <YYYY-MM-DD>" на сегодняшнюю дату;
+#   2) пересчитывает checksums.txt (scripts/generate-checksums.sh) для --verify-integrity;
+#   3) добавляет оба файла обратно в индекс коммита.
+set -euo pipefail
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+cd "$ROOT_DIR"
+
+if git diff --cached --name-only | grep -qx "macos-dns-test.sh"; then
+  TODAY="$(date +%Y-%m-%d)"
+  sed -i.bak -E "s/^(# Last Modified: ).*/\1${TODAY}/" macos-dns-test.sh
+  rm -f macos-dns-test.sh.bak
+
+  ./scripts/generate-checksums.sh
+
+  git add macos-dns-test.sh checksums.txt
+fi
