@@ -40,10 +40,23 @@ teardown() {
   grep -q '>> PRIMARY_CLASSIFICATION' "$OUT_FILE"
   grep -q '>> EVIDENCE_MATRIX' "$OUT_FILE"
   grep -q 'PRIMARY_CLASSIFICATION=' "$OUT_FILE"
+  grep -q '>> EXTERNAL_DNS_PROBE' "$OUT_FILE"
+  grep -q '>> CROSS_RESOLVER_CONSISTENCY' "$OUT_FILE"
+  grep -q 'external_probe_skipped=' "$OUT_FILE"
 }
 
 @test "--output writes to the exact path given, not \$(pwd)" {
   run timeout 90 bash "$SCRIPT_UNDER_TEST" --domain=example.com --yes --output="$OUT_FILE" < /dev/null
   [ "$status" -eq 0 ]
   [ -f "$OUT_FILE" ]
+}
+
+@test "--no-external-dns skips independent DNS probes and marks it in the report" {
+  run timeout 90 bash "$SCRIPT_UNDER_TEST" --domain=example.com --yes --no-external-dns --output="$OUT_FILE" < /dev/null
+  [ "$status" -eq 0 ]
+  [ -f "$OUT_FILE" ]
+  grep -q '>> EXTERNAL_DNS_PROBE' "$OUT_FILE"
+  grep -q 'skipped=yes reason=disabled_by_flag' "$OUT_FILE"
+  grep -q 'external_probe_skipped=yes' "$OUT_FILE"
+  ! grep -q 'external_resolvers_ok=' "$OUT_FILE"
 }
