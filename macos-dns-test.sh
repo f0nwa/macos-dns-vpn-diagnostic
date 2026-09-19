@@ -139,6 +139,22 @@ run_sudo() {
   fi
   sudo "$@"
 }
+run_with_timeout() {
+  # Портативный аналог `timeout N cmd...`: в BSD/macOS нет системной утилиты
+  # timeout (это GNU coreutils), а полагаться на её наличие у конечного
+  # пользователя нельзя (скрипт запускается как `curl | bash` на голой
+  # macOS). Убивает команду по SIGTERM, если она не уложилась в N секунд.
+  local secs="$1"; shift
+  "$@" &
+  local cmd_pid=$!
+  ( sleep "$secs"; kill -TERM "$cmd_pid" 2>/dev/null ) &
+  local watchdog_pid=$!
+  wait "$cmd_pid" 2>/dev/null
+  local rc=$?
+  kill "$watchdog_pid" 2>/dev/null
+  wait "$watchdog_pid" 2>/dev/null
+  return "$rc"
+}
 SUDO_KEEPALIVE_PID=""
 stop_sudo_keepalive() {
   if [ -n "${SUDO_KEEPALIVE_PID:-}" ] && kill -0 "$SUDO_KEEPALIVE_PID" 2>/dev/null; then
@@ -1350,7 +1366,7 @@ say_step_detail "Короткий capture DNS/mDNS/LLMNR: tcpdump"
 say_step_detail "Ищем PF block события за 1 час"
 # 6. DNS трафик + блоки
 echo -e "\n>> DNS трафик (30 пакетов)" >> "$OUT"
-run_sudo tcpdump -i any -n '(udp or tcp) and (port 53 or port 5353 or port 5355)' -c 30 2>/dev/null >> "$OUT" || echo "tcpdump: нет DNS/mDNS/LLMNR трафика" >> "$OUT"
+run_with_timeout 5 run_sudo tcpdump -i any -n '(udp or tcp) and (port 53 or port 5353 or port 5355)' -c 30 2>/dev/null >> "$OUT" || echo "tcpdump: нет DNS/mDNS/LLMNR трафика (или лимит времени 5с)" >> "$OUT"
 echo -e "\n>> PF блоки (1ч)" >> "$OUT"
 PF_BLOCKS="$(run_sudo log show --style compact --predicate 'subsystem == "com.apple.pf"' --last 1h --info 2>/dev/null | grep -i block | head -15 || true)"
 if [ -n "$PF_BLOCKS" ]; then
