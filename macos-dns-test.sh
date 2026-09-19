@@ -1,7 +1,7 @@
 #!/bin/bash
 # Description: Полная диагностика DNS/VPN/Proxy на macOS с классификацией причин и e2e-проверкой.
 # Author: f0nwa
-# Last Modified: 2026-09-18
+# Last Modified: 2026-09-19
 
 set -u
 
@@ -527,6 +527,7 @@ run_e2e_curl_probe() {
   emit_fact e2e http_phase "$http_phase" "curl"
   emit_fact e2e http_code "${http_code:-000}" "curl"
   emit_fact e2e remote_ip "${remote_ip:-n/a}" "curl"
+  emit_fact e2e dns_time_sec "${t_dns:-0}" "curl"
   emit_fact e2e note "$note" "curl"
   emit_fact e2e verdict "$E2E_VERDICT" "curl"
 
@@ -534,6 +535,7 @@ run_e2e_curl_probe() {
   if [ "$url_probe" != "$url_display" ]; then
     echo "curl_probe_url=$url_probe" >> "$OUT"
   fi
+  echo "curl_timing: dns=${t_dns:-0}s connect=${t_conn:-0}s tls=${t_tls:-0}s" >> "$OUT"
   sed -n '1,80p' "$curl_log" >> "$OUT" 2>/dev/null || true
 }
 
@@ -810,7 +812,7 @@ build_hypotheses() {
 }
 
 render_evidence_sections() {
-  local elapsed now sorted line score layer symptom evidence impact next confidence rank=0
+  local elapsed now sorted score layer symptom evidence impact next confidence rank=0
   now="$(date +%s)"
   elapsed=$((now - RUN_START_EPOCH))
   if [ "$elapsed" -gt "$TIME_BUDGET_SEC" ]; then
