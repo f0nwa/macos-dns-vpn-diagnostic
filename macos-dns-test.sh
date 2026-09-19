@@ -9,15 +9,17 @@ FLAG_DOMAIN=""
 FLAG_YES=0
 FLAG_OUTPUT=""
 FLAG_VERIFY_INTEGRITY=0
+FLAG_NO_EXTERNAL_DNS=0
 for _arg in "$@"; do
   case "$_arg" in
     --domain=*) FLAG_DOMAIN="${_arg#--domain=}" ;;
     --yes) FLAG_YES=1 ;;
     --output=*) FLAG_OUTPUT="${_arg#--output=}" ;;
     --verify-integrity) FLAG_VERIFY_INTEGRITY=1 ;;
+    --no-external-dns) FLAG_NO_EXTERNAL_DNS=1 ;;
     -h|--help)
       cat <<'USAGE'
-Usage: macos-dns-test.sh [--domain=<host>] [--yes] [--output=<path>] [--verify-integrity]
+Usage: macos-dns-test.sh [--domain=<host>] [--yes] [--output=<path>] [--verify-integrity] [--no-external-dns]
 
   --domain=<host>       Пропустить интерактивный ввод, тестировать этот домен.
   --yes                 Автоматически подтверждать все y/n запросы (в т.ч. установку Homebrew/python3).
@@ -26,6 +28,8 @@ Usage: macos-dns-test.sh [--domain=<host>] [--yes] [--output=<path>] [--verify-i
                         (требует локальный клон: scripts/integrity-lib.sh должен лежать
                         рядом со скриптом; для one-liner "curl | bash" эта проверка
                         недоступна, см. README).
+  --no-external-dns     Не делать дополнительные запросы к независимым внешним DNS/DoH
+                        (1.1.1.1, 8.8.8.8, Cloudflare/Google DoH).
 
 Без флагов скрипт работает как раньше, в интерактивном режиме.
 USAGE
@@ -302,52 +306,65 @@ detect_homebrew_python3_bin() {
 }
 
 dig_probe() {
-  # Вывод в stdout: result|reason|answers
+  # Вывод в stdout: result|reason|answers|ips
   # result: ok|fail; reason: NOERROR|NODATA|NXDOMAIN|SERVFAIL|REFUSED|TIMEOUT|UNKNOWN
-  local domain="$1" rr="$2" server="${3:-}" out status answer
+  # ips: адреса из секции ANSWER через запятую (или "-", если их нет)
+  # transport: udp (по умолчанию) | tcp — для отличия "DNS сломан" от "порт 53 фильтруется"
+  local domain="$1" rr="$2" server="${3:-}" transport="${4:-udp}" out status answer ips
+  local dig_extra=""
+  [ "$transport" = "tcp" ] && dig_extra="+tcp"
   if [ -n "$server" ]; then
-    out="$(dig +time=2 +tries=1 +noall +comments +answer "$domain" "$rr" @"$server" 2>&1)"
+    # shellcheck disable=SC2086
+    out="$(dig +time=2 +tries=1 +noall +comments +answer $dig_extra "$domain" "$rr" @"$server" 2>&1)"
   else
-    out="$(dig +time=2 +tries=1 +noall +comments +answer "$domain" "$rr" 2>&1)"
+    # shellcheck disable=SC2086
+    out="$(dig +time=2 +tries=1 +noall +comments +answer $dig_extra "$domain" "$rr" 2>&1)"
   fi
 
   status="$(printf '%s\n' "$out" | sed -n 's/.*status: \([A-Z][A-Z]*\),.*/\1/p' | head -1)"
   answer="$(printf '%s\n' "$out" | sed -n 's/.*ANSWER: \([0-9][0-9]*\).*/\1/p' | head -1)"
   [ -z "$answer" ] && answer=0
+  ips="$(printf '%s\n' "$out" | awk -v want="$rr" '$0 !~ /^;/ && NF >= 5 && $4 == want {print $5}' | paste -sd, -)"
+  [ -z "$ips" ] && ips="-"
 
   if printf '%s\n' "$out" | grep -Eiq 'timed out|no servers could be reached'; then
-    echo "fail|TIMEOUT|$answer"
+    echo "fail|TIMEOUT|$answer|-"
   elif [ "$status" = "NOERROR" ] && [ "$answer" -gt 0 ]; then
-    echo "ok|NOERROR|$answer"
+    echo "ok|NOERROR|$answer|$ips"
   elif [ "$status" = "NOERROR" ] && [ "$answer" -eq 0 ]; then
-    echo "fail|NODATA|0"
+    echo "fail|NODATA|0|-"
   elif [ -n "$status" ]; then
-    echo "fail|$status|$answer"
+    echo "fail|$status|$answer|-"
   else
-    echo "fail|UNKNOWN|$answer"
+    echo "fail|UNKNOWN|$answer|-"
   fi
 }
 
 nslookup_probe() {
-  # Вывод в stdout: result|reason|answers
-  local domain="$1" server="${2:-}" out
+  # Вывод в stdout: result|reason|answers|ips
+  local domain="$1" server="${2:-}" out ips
   if [ -n "$server" ]; then
     out="$(nslookup -timeout=2 "$domain" "$server" 2>&1 || true)"
   else
     out="$(nslookup -timeout=2 "$domain" 2>&1 || true)"
   fi
+  # Строка сервера в выводе nslookup имеет вид "Address: 1.2.3.4#53" — исключаем
+  # её через "$" (конец строки сразу после адреса), чтобы не принять адрес
+  # самого резолвера за адрес домена.
+  ips="$(printf '%s\n' "$out" | grep -E '^Address:[[:space:]]*[0-9a-fA-F:.]+$' | awk '{print $2}' | paste -sd, -)"
+  [ -z "$ips" ] && ips="-"
   if printf '%s\n' "$out" | grep -Eiq 'timed out|no servers could be reached'; then
-    echo "fail|TIMEOUT|0"
+    echo "fail|TIMEOUT|0|-"
   elif printf '%s\n' "$out" | grep -Eiq 'NXDOMAIN'; then
-    echo "fail|NXDOMAIN|0"
+    echo "fail|NXDOMAIN|0|-"
   elif printf '%s\n' "$out" | grep -Eiq 'SERVFAIL'; then
-    echo "fail|SERVFAIL|0"
+    echo "fail|SERVFAIL|0|-"
   elif printf '%s\n' "$out" | grep -Eiq 'REFUSED'; then
-    echo "fail|REFUSED|0"
-  elif printf '%s\n' "$out" | grep -Eiq '^Address:[[:space:]]*[0-9a-fA-F:.]'; then
-    echo "ok|NOERROR|1"
+    echo "fail|REFUSED|0|-"
+  elif [ "$ips" != "-" ]; then
+    echo "ok|NOERROR|1|$ips"
   else
-    echo "fail|UNKNOWN|0"
+    echo "fail|UNKNOWN|0|-"
   fi
 }
 
@@ -362,10 +379,69 @@ E2E_VERDICT="not_run"
 PRIMARY_CLASSIFICATION="unknown"
 MOST_LIKELY_LAYER="dns"
 
+# Независимые от локальной сети резолверы для контрольных проверок (не входят
+# в DNS_SERVERS, обнаруженные из scutil/networksetup/resolv.conf).
+EXTERNAL_DNS_SERVERS="1.1.1.1 8.8.8.8"
+EXTERNAL_PROBE_SKIPPED=0
+EXTERNAL_ANY_OK=0
+EXTERNAL_DOH_OK=0
+EXTERNAL_UDP53_ANY_OK=0
+
+ip_is_private() {
+  # 0 (true), если это приватный/зарезервированный/loopback/CGNAT IPv4-адрес.
+  # Для не-IPv4 (например IPv6) или мусора возвращает 1 (не считаем приватным
+  # по этой эвристике) — этого достаточно, т.к. сейчас проверяются только A-записи.
+  local ip="$1" a b c d
+  case "$ip" in
+    ""|"-") return 1 ;;
+  esac
+  IFS='.' read -r a b c d <<< "$ip"
+  case "$a$b$c$d" in
+    *[!0-9]*|"") return 1 ;;
+  esac
+  [ "$a" -eq 10 ] && return 0
+  [ "$a" -eq 127 ] && return 0
+  [ "$a" -eq 0 ] && return 0
+  [ "$a" -eq 169 ] && [ "$b" -eq 254 ] && return 0
+  [ "$a" -eq 172 ] && [ "$b" -ge 16 ] && [ "$b" -le 31 ] && return 0
+  [ "$a" -eq 192 ] && [ "$b" -eq 168 ] && return 0
+  [ "$a" -eq 100 ] && [ "$b" -ge 64 ] && [ "$b" -le 127 ] && return 0
+  return 1
+}
+
+doh_probe() {
+  # Вывод в stdout: provider|result|reason|ips
+  # DNS-over-HTTPS к независимому провайдеру (порт 443) в обход UDP/TCP-53 —
+  # показывает, блокируется ли именно DNS-порт, а не сеть целиком.
+  local domain="$1" rr="$2" provider="$3" url out status ips
+  case "$provider" in
+    cloudflare) url="https://cloudflare-dns.com/dns-query?name=${domain}&type=${rr}" ;;
+    google) url="https://dns.google/resolve?name=${domain}&type=${rr}" ;;
+    *) echo "$provider|fail|UNKNOWN_PROVIDER|-"; return ;;
+  esac
+  out="$(curl -s -m 3 --connect-timeout 3 -H 'accept: application/dns-json' "$url" 2>/dev/null)"
+  if [ -z "$out" ]; then
+    echo "$provider|fail|NO_RESPONSE|-"
+    return
+  fi
+  status="$(printf '%s' "$out" | sed -n 's/.*"Status":\([0-9]*\).*/\1/p' | head -1)"
+  ips="$(printf '%s' "$out" | grep -Eo '"data":"[0-9.]+"' | sed -E 's/"data":"([0-9.]+)"/\1/' | paste -sd, -)"
+  [ -z "$ips" ] && ips="-"
+  if [ "$status" = "0" ] && [ "$ips" != "-" ]; then
+    echo "$provider|ok|NOERROR|$ips"
+  elif [ "$status" = "0" ]; then
+    echo "$provider|fail|NODATA|-"
+  elif [ "$status" = "3" ]; then
+    echo "$provider|fail|NXDOMAIN|-"
+  else
+    echo "$provider|fail|UNKNOWN|-"
+  fi
+}
+
 run_scoped_resolver_probes() {
   local snapshot="$1" domain="$2"
   local resolver_id if_index iface flags reach ns
-  local res_a st_a rs_a an_a
+  local res_a st_a rs_a an_a ip_a
   local ns_ok
 
   echo -e "\n>> SCUTIL_SCOPED_NS_PROBE ($domain)" >> "$OUT"
@@ -384,6 +460,7 @@ run_scoped_resolver_probes() {
     st_a="$(printf '%s' "$res_a" | cut -d'|' -f1)"
     rs_a="$(printf '%s' "$res_a" | cut -d'|' -f2)"
     an_a="$(printf '%s' "$res_a" | cut -d'|' -f3)"
+    ip_a="$(printf '%s' "$res_a" | cut -d'|' -f4)"
 
     if [ "$st_a" = "ok" ]; then
       ns_ok=1
@@ -400,8 +477,8 @@ run_scoped_resolver_probes() {
       SCOPED_FAIL=$((SCOPED_FAIL + 1))
     fi
 
-    echo "resolver#$resolver_id if_index=$if_index iface=${iface:-unknown} ns=$ns flags=${flags:-n/a} reach=${reach:-n/a} A=${st_a}/${rs_a}/${an_a}" >> "$OUT"
-    emit_fact resolver scoped_probe "resolver=$resolver_id;if_index=$if_index;iface=${iface:-unknown};ns=$ns;a=$st_a/$rs_a/$an_a;ok=$ns_ok" "scutil scoped"
+    echo "resolver#$resolver_id if_index=$if_index iface=${iface:-unknown} ns=$ns flags=${flags:-n/a} reach=${reach:-n/a} A=${st_a}/${rs_a}/${an_a} ips=$ip_a" >> "$OUT"
+    emit_fact resolver scoped_probe "resolver=$resolver_id;if_index=$if_index;iface=${iface:-unknown};ns=$ns;a=$st_a/$rs_a/$an_a;ips=$ip_a;ok=$ns_ok" "scutil scoped"
   done < <(
     printf '%s\n' "$snapshot" | awk '
       function flush_block(   i) {
@@ -450,6 +527,195 @@ run_scoped_resolver_probes() {
   emit_fact resolver scoped_resolvers_ok "$SCOPED_OK" "scutil scoped"
   emit_fact resolver scoped_resolvers_fail "$SCOPED_FAIL" "scutil scoped"
   emit_fact resolver scoped_best_path "$SCOPED_BEST_PATH" "scutil scoped"
+}
+
+run_external_dns_probes() {
+  # Пробы через заведомо независимые от локальной сети резолверы (1.1.1.1/8.8.8.8):
+  # UDP-53, TCP-53 и DoH (443). Позволяет отличить "сломано локально" от "домен
+  # реально недоступен/фильтруется снаружи" и поймать избирательную блокировку
+  # именно DNS-порта (частый паттерн провайдерской фильтрации).
+  local domain="$1" srv res state reason ans ips provider
+  local total_count=0 timeout_count=0
+
+  echo -e "\n>> EXTERNAL_DNS_PROBE" >> "$OUT"
+
+  if [ "$FLAG_NO_EXTERNAL_DNS" = "1" ]; then
+    EXTERNAL_PROBE_SKIPPED=1
+    echo "skipped=yes reason=disabled_by_flag" >> "$OUT"
+    emit_fact external probe_skipped yes "disabled_by_flag(--no-external-dns)"
+    return
+  fi
+  emit_fact external probe_skipped no "enabled"
+
+  for srv in $EXTERNAL_DNS_SERVERS; do
+    if command -v dig >/dev/null 2>&1; then
+      res="$(dig_probe "$domain" A "$srv" udp)"
+    else
+      res="$(nslookup_probe "$domain" "$srv")"
+    fi
+    state="$(printf '%s' "$res" | cut -d'|' -f1)"
+    reason="$(printf '%s' "$res" | cut -d'|' -f2)"
+    ans="$(printf '%s' "$res" | cut -d'|' -f3)"
+    ips="$(printf '%s' "$res" | cut -d'|' -f4)"
+    total_count=$((total_count + 1))
+    [ "$reason" = "TIMEOUT" ] && timeout_count=$((timeout_count + 1))
+    if [ "$state" = "ok" ]; then
+      EXTERNAL_ANY_OK=1
+      EXTERNAL_UDP53_ANY_OK=1
+    fi
+    echo "udp53 server=$srv result=$state reason=$reason answers=$ans ips=$ips" >> "$OUT"
+    emit_fact external dns_probe "server=$srv;transport=udp;result=$state;reason=$reason;answers=$ans;ips=$ips" "dig external"
+
+    if command -v dig >/dev/null 2>&1; then
+      res="$(dig_probe "$domain" A "$srv" tcp)"
+      state="$(printf '%s' "$res" | cut -d'|' -f1)"
+      reason="$(printf '%s' "$res" | cut -d'|' -f2)"
+      ips="$(printf '%s' "$res" | cut -d'|' -f4)"
+      echo "tcp53 server=$srv result=$state reason=$reason ips=$ips" >> "$OUT"
+      emit_fact external dns_probe_tcp "server=$srv;transport=tcp;result=$state;reason=$reason;ips=$ips" "dig +tcp external"
+    fi
+  done
+
+  if command -v curl >/dev/null 2>&1; then
+    for provider in cloudflare google; do
+      res="$(doh_probe "$domain" A "$provider")"
+      state="$(printf '%s' "$res" | cut -d'|' -f2)"
+      reason="$(printf '%s' "$res" | cut -d'|' -f3)"
+      ips="$(printf '%s' "$res" | cut -d'|' -f4)"
+      total_count=$((total_count + 1))
+      [ "$reason" = "NO_RESPONSE" ] && timeout_count=$((timeout_count + 1))
+      if [ "$state" = "ok" ]; then
+        EXTERNAL_ANY_OK=1
+        EXTERNAL_DOH_OK=1
+      fi
+      echo "doh provider=$provider result=$state reason=$reason ips=$ips" >> "$OUT"
+      emit_fact external doh_probe "provider=$provider;result=$state;reason=$reason;ips=$ips" "curl DoH"
+      [ "$state" = "ok" ] && break
+    done
+  fi
+
+  emit_fact external any_ok "$([ "$EXTERNAL_ANY_OK" -eq 1 ] && echo yes || echo no)" "external probes"
+  if [ "$total_count" -gt 0 ] && [ "$timeout_count" -eq "$total_count" ]; then
+    emit_fact external all_timeout yes "external probes"
+  else
+    emit_fact external all_timeout no "external probes"
+  fi
+  if [ "$EXTERNAL_UDP53_ANY_OK" -eq 0 ] && [ "$EXTERNAL_DOH_OK" -eq 1 ]; then
+    emit_fact external udp53_blocked_but_doh_ok yes "external probes"
+  else
+    emit_fact external udp53_blocked_but_doh_ok no "external probes"
+  fi
+  echo "any_ok=$([ "$EXTERNAL_ANY_OK" -eq 1 ] && echo yes || echo no)" >> "$OUT"
+}
+
+run_cross_resolver_consistency_check() {
+  # Сравнивает реальные IP-ответы всех уже опрошенных резолверов (обнаруженные
+  # системой DNS-серверы, системный резолвер по умолчанию, scoped-резолверы по
+  # интерфейсам, независимые внешние) между собой. Расхождение — особенно с
+  # приватным/зарезервированным IP у одного из резолверов — куда показательнее,
+  # чем отдельные ok/fail по каждому резолверу.
+  local consensus mismatch_count=0 private_suspect_count=0
+  local utun_mismatch=0 nonutun_mismatch=0
+  local label ips_val is_utun ip is_priv
+
+  echo -e "\n>> CROSS_RESOLVER_CONSISTENCY" >> "$OUT"
+
+  consensus="$(awk -F'\t' '
+    $2=="resolver" && $3=="dns_server_probe" && $4 ~ /result=ok/ { collect() }
+    $2=="resolver" && $3=="system_probe" && $4 ~ /result=ok/ { collect() }
+    $2=="resolver" && $3=="scoped_probe" && $4 ~ /a=ok\// { collect() }
+    $2=="external" && ($3=="dns_probe" || $3=="doh_probe") && $4 ~ /result=ok/ { collect() }
+    function collect() {
+      if (match($4, /ips=[^;]*/)) {
+        v = substr($4, RSTART + 4, RLENGTH - 4)
+        if (v != "-" && v != "") cnt[v]++
+      }
+    }
+    END {
+      max = 0; best = "-"
+      for (k in cnt) if (cnt[k] > max) { max = cnt[k]; best = k }
+      print best
+    }' "$FACTS_FILE")"
+  [ -z "$consensus" ] && consensus="-"
+
+  emit_fact resolver cross_consensus_ip "$consensus" "cross-resolver check"
+  echo "consensus_ip=$consensus" >> "$OUT"
+
+  while IFS=$'\t' read -r label ips_val is_utun; do
+    [ -z "$label" ] && continue
+    if [ "$ips_val" = "-" ] || [ -z "$ips_val" ]; then
+      continue
+    fi
+    if [ "$consensus" = "-" ] || [ "$ips_val" = "$consensus" ]; then
+      echo "$label ips=$ips_val consistent=yes" >> "$OUT"
+      continue
+    fi
+    mismatch_count=$((mismatch_count + 1))
+    is_priv=no
+    IFS=',' read -ra _cross_ip_arr <<< "$ips_val"
+    for ip in "${_cross_ip_arr[@]}"; do
+      [ -z "$ip" ] && continue
+      if ip_is_private "$ip"; then
+        is_priv=yes
+        break
+      fi
+    done
+    [ "$is_priv" = "yes" ] && private_suspect_count=$((private_suspect_count + 1))
+    case "$is_utun" in
+      yes) utun_mismatch=$((utun_mismatch + 1)) ;;
+      no) nonutun_mismatch=$((nonutun_mismatch + 1)) ;;
+    esac
+    echo "$label ips=$ips_val consistent=no private_ip_suspect=$is_priv" >> "$OUT"
+    emit_fact resolver cross_mismatch "label=$label;ips=$ips_val;private_ip_suspect=$is_priv;utun=$is_utun" "cross-resolver check"
+  done < <(awk -F'\t' '
+      $2=="resolver" && $3=="dns_server_probe" && $4 ~ /result=ok/ {
+        s = "?"; i = "-"
+        if (match($4, /server=[^;]*/)) s = substr($4, RSTART + 7, RLENGTH - 7)
+        if (match($4, /ips=[^;]*/)) i = substr($4, RSTART + 4, RLENGTH - 4)
+        print "dns_server:" s "\t" i "\tn/a"
+      }
+      $2=="resolver" && $3=="system_probe" && $4 ~ /result=ok/ {
+        i = "-"
+        if (match($4, /ips=[^;]*/)) i = substr($4, RSTART + 4, RLENGTH - 4)
+        print "system_default\t" i "\tn/a"
+      }
+      $2=="resolver" && $3=="scoped_probe" && $4 ~ /a=ok\// {
+        rid = "?"; ifc = "?"; i = "-"
+        if (match($4, /resolver=[0-9]+/)) rid = substr($4, RSTART + 9, RLENGTH - 9)
+        if (match($4, /iface=[^;]*/)) ifc = substr($4, RSTART + 6, RLENGTH - 6)
+        if (match($4, /ips=[^;]*/)) i = substr($4, RSTART + 4, RLENGTH - 4)
+        u = (ifc ~ /^utun/) ? "yes" : "no"
+        print "scoped#" rid "/" ifc "\t" i "\t" u
+      }
+      $2=="external" && $3=="dns_probe" && $4 ~ /result=ok/ {
+        s = "?"; i = "-"
+        if (match($4, /server=[^;]*/)) s = substr($4, RSTART + 7, RLENGTH - 7)
+        if (match($4, /ips=[^;]*/)) i = substr($4, RSTART + 4, RLENGTH - 4)
+        print "external:" s "\t" i "\tn/a"
+      }
+      $2=="external" && $3=="doh_probe" && $4 ~ /result=ok/ {
+        p = "?"; i = "-"
+        if (match($4, /provider=[^;]*/)) p = substr($4, RSTART + 9, RLENGTH - 9)
+        if (match($4, /ips=[^;]*/)) i = substr($4, RSTART + 4, RLENGTH - 4)
+        print "doh:" p "\t" i "\tn/a"
+      }
+    ' "$FACTS_FILE")
+
+  emit_fact resolver cross_mismatch_count "$mismatch_count" "cross-resolver check"
+  emit_fact resolver cross_private_ip_suspect_count "$private_suspect_count" "cross-resolver check"
+  if [ "$utun_mismatch" -gt 0 ] && [ "$nonutun_mismatch" -eq 0 ]; then
+    emit_fact route cross_mismatch_utun_only yes "cross-resolver check"
+  else
+    emit_fact route cross_mismatch_utun_only no "cross-resolver check"
+  fi
+  if [ "$nonutun_mismatch" -gt 0 ] && [ "$utun_mismatch" -eq 0 ]; then
+    emit_fact interceptor cross_mismatch_nonutun_only yes "cross-resolver check"
+  else
+    emit_fact interceptor cross_mismatch_nonutun_only no "cross-resolver check"
+  fi
+
+  echo "mismatch_count=$mismatch_count" >> "$OUT"
+  echo "private_ip_suspect_count=$private_suspect_count" >> "$OUT"
 }
 
 run_e2e_curl_probe() {
@@ -657,6 +923,13 @@ render_dual_mode_sections() {
   echo "scoped_resolvers_tested=$SCOPED_TESTED" >> "$OUT"
   echo "scoped_resolvers_ok=$SCOPED_OK" >> "$OUT"
   echo "scoped_resolvers_fail=$SCOPED_FAIL" >> "$OUT"
+  if [ "$EXTERNAL_PROBE_SKIPPED" -eq 1 ]; then
+    echo "external_probe_skipped=yes" >> "$OUT"
+  else
+    echo "external_probe_skipped=no" >> "$OUT"
+    echo "external_resolvers_ok=$([ "$EXTERNAL_ANY_OK" -eq 1 ] && echo yes || echo no)" >> "$OUT"
+  fi
+  echo "cross_resolver_mismatch_count=$(awk -F'\t' '$2=="resolver"&&$3=="cross_mismatch_count"{v=$4} END{if(v=="") v=0; print v}' "$FACTS_FILE")" >> "$OUT"
   echo "best_path=$SCOPED_BEST_PATH" >> "$OUT"
   echo "verdict=$DNS_ONLY_VERDICT" >> "$OUT"
 
@@ -706,8 +979,11 @@ confidence_label() {
 }
 
 build_hypotheses() {
-  local score_resolver=0 score_route=0 score_interceptor=0 score_policy=0
-  local ev_resolver=() ev_route=() ev_interceptor=() ev_policy=()
+  local score_resolver=0 score_route=0 score_interceptor=0 score_policy=0 score_external=0
+  local ev_resolver=() ev_route=() ev_interceptor=() ev_policy=() ev_external=()
+  local cross_mismatch_count cross_private_suspect_count
+  cross_mismatch_count="$(awk -F'\t' '$2=="resolver"&&$3=="cross_mismatch_count"{v=$4} END{if(v=="") v=0; print v}' "$FACTS_FILE")"
+  cross_private_suspect_count="$(awk -F'\t' '$2=="resolver"&&$3=="cross_private_ip_suspect_count"{v=$4} END{if(v=="") v=0; print v}' "$FACTS_FILE")"
 
   if has_fact resolver nameserver_missing yes; then
     score_resolver=$((score_resolver + 40))
@@ -781,6 +1057,36 @@ build_hypotheses() {
     ev_policy+=("есть PF block события за последний час")
   fi
 
+  if [ "$cross_private_suspect_count" -gt 0 ]; then
+    score_interceptor=$((score_interceptor + 45))
+    ev_interceptor+=("резолвер(ы) возвращают приватный/зарезервированный IP вместо публичного консенсуса ($cross_private_suspect_count шт.)")
+  elif [ "$cross_mismatch_count" -gt 0 ]; then
+    score_interceptor=$((score_interceptor + 20))
+    ev_interceptor+=("часть резолверов отвечает IP, отличным от большинства ($cross_mismatch_count шт.)")
+  fi
+  if has_fact route cross_mismatch_utun_only yes; then
+    score_route=$((score_route + 25))
+    ev_route+=("рассинхронизация ответов ограничена VPN/utun путями")
+  fi
+  if has_fact interceptor cross_mismatch_nonutun_only yes; then
+    score_interceptor=$((score_interceptor + 25))
+    ev_interceptor+=("рассинхронизация ответов вне VPN — вероятно локальная сеть/провайдер, не VPN")
+  fi
+  if has_fact external probe_skipped no; then
+    if has_fact external any_ok no && has_fact external all_timeout no; then
+      score_external=$((score_external + 50))
+      ev_external+=("независимые внешние резолверы (не из конфигурации системы) тоже не резолвят домен")
+    fi
+    if has_fact external udp53_blocked_but_doh_ok yes; then
+      score_external=$((score_external + 35))
+      ev_external+=("DNS по UDP:53 к внешним резолверам не проходит, но DoH (443) работает — похоже на избирательную блокировку DNS-порта")
+    fi
+    if has_fact external any_ok yes && has_fact resolver system_resolver_ok no; then
+      score_interceptor=$((score_interceptor + 20))
+      ev_interceptor+=("независимые резолверы отвечают нормально, а системный резолвер — нет: проблема локальная")
+    fi
+  fi
+
   if [ "$score_resolver" -gt 0 ]; then
     add_hypothesis "$score_resolver" "resolver" \
       "Проблема на уровне DNS конфигурации/резолвера" \
@@ -808,6 +1114,13 @@ build_hypotheses() {
       "$(join_by_semicolon "${ev_policy[@]}")" \
       "DNS запросы могут блокироваться правилами ОС" \
       "sudo pfctl -sr; sudo log show --predicate 'subsystem == \"com.apple.pf\"' --last 1h"
+  fi
+  if [ "$score_external" -gt 0 ]; then
+    add_hypothesis "$score_external" "external" \
+      "Проблема вне этой машины: домен фильтруется/недоступен снаружи, а не только из-за локальной VPN/DNS конфигурации" \
+      "$(join_by_semicolon "${ev_external[@]}")" \
+      "Локальные настройки могут быть ни при чём — проблема на стороне сети/провайдера/самого домена" \
+      "проверить домен с другого устройства/сети; вручную curl -H 'accept: application/dns-json' 'https://cloudflare-dns.com/dns-query?name=<domain>&type=A'"
   fi
 }
 
@@ -1233,15 +1546,16 @@ if command -v dig >/dev/null 2>&1; then
     PROBE_STATE="$(printf '%s' "$PROBE_RESULT" | cut -d'|' -f1)"
     PROBE_REASON="$(printf '%s' "$PROBE_RESULT" | cut -d'|' -f2)"
     PROBE_ANS="$(printf '%s' "$PROBE_RESULT" | cut -d'|' -f3)"
+    PROBE_IPS="$(printf '%s' "$PROBE_RESULT" | cut -d'|' -f4)"
     if [ "$PROBE_STATE" = "ok" ]; then
-      echo "УСПЕХ $s [A] status=$PROBE_REASON answers=$PROBE_ANS" >> "$OUT"
+      echo "УСПЕХ $s [A] status=$PROBE_REASON answers=$PROBE_ANS ips=$PROBE_IPS" >> "$OUT"
       DNS_OK=$((DNS_OK + 1))
     else
       echo "СБОЙ $s [A] reason=$PROBE_REASON answers=$PROBE_ANS" >> "$OUT"
       add_cause "DNS сервер $s не резолвит $TEST_DOMAIN (A): $PROBE_REASON"
       DNS_FAIL=$((DNS_FAIL + 1))
     fi
-    emit_fact resolver dns_server_probe "server=$s;rr=A;result=$PROBE_STATE;reason=$PROBE_REASON;answers=$PROBE_ANS" "dig"
+    emit_fact resolver dns_server_probe "server=$s;rr=A;result=$PROBE_STATE;reason=$PROBE_REASON;answers=$PROBE_ANS;ips=$PROBE_IPS" "dig"
   done
   emit_fact resolver dns_server_probe_total "$DNS_TOTAL" "dig"
   emit_fact resolver dns_server_probe_ok "$DNS_OK" "dig"
@@ -1261,13 +1575,14 @@ if command -v dig >/dev/null 2>&1; then
   PROBE_STATE="$(printf '%s' "$PROBE_RESULT" | cut -d'|' -f1)"
   PROBE_REASON="$(printf '%s' "$PROBE_RESULT" | cut -d'|' -f2)"
   PROBE_ANS="$(printf '%s' "$PROBE_RESULT" | cut -d'|' -f3)"
+  PROBE_IPS="$(printf '%s' "$PROBE_RESULT" | cut -d'|' -f4)"
   if [ "$PROBE_STATE" = "ok" ]; then
-    echo "УСПЕХ системный резолвер [A] status=$PROBE_REASON answers=$PROBE_ANS" >> "$OUT"
+    echo "УСПЕХ системный резолвер [A] status=$PROBE_REASON answers=$PROBE_ANS ips=$PROBE_IPS" >> "$OUT"
     SYS_OK=$((SYS_OK + 1))
   else
     echo "СБОЙ системный резолвер [A] reason=$PROBE_REASON answers=$PROBE_ANS" >> "$OUT"
   fi
-  emit_fact resolver system_probe "rr=A;result=$PROBE_STATE;reason=$PROBE_REASON;answers=$PROBE_ANS" "dig system"
+  emit_fact resolver system_probe "rr=A;result=$PROBE_STATE;reason=$PROBE_REASON;answers=$PROBE_ANS;ips=$PROBE_IPS" "dig system"
   if [ "$SYS_OK" -gt 0 ]; then
     emit_fact resolver system_resolver_ok yes "dig system"
   else
@@ -1428,6 +1743,8 @@ if [ -n "${DEFAULT_ROUTE_IF:-}" ] && printf '%s' "$DEFAULT_ROUTE_IF" | grep -q '
 fi
 
 run_scoped_resolver_probes "$SCUTIL_DNS_RAW" "$TEST_DOMAIN_QUERY"
+run_external_dns_probes "$TEST_DOMAIN_QUERY"
+run_cross_resolver_consistency_check
 run_e2e_curl_probe "$TEST_DOMAIN" "$TEST_DOMAIN_QUERY"
 render_dual_mode_sections
 render_evidence_sections

@@ -13,9 +13,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install shellcheck and bats-core
+      - name: Install shellcheck, bats-core and coreutils
+        # coreutils нужен ради GNU `timeout`: на голой macOS (BSD userland)
+        # его нет, а tests/cli_flags.bats на нём завязан (защита от зависания
+        # при полном прогоне скрипта). gnubin кладём в PATH, чтобы `timeout`
+        # резолвился в GNU-версию без переписывания тестов на `gtimeout`.
         run: |
-          brew install shellcheck bats-core
+          brew install shellcheck bats-core coreutils
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
 
       - name: ShellCheck
         # Скрипт никогда раньше не проверялся линтером, поэтому первый проход
