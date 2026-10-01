@@ -1,7 +1,7 @@
 #!/bin/bash
 # Description: Полная диагностика DNS/VPN/Proxy на macOS с классификацией причин и e2e-проверкой.
 # Author: f0nwa
-# Last Modified: 2026-09-19
+# Last Modified: 2026-10-01
 
 set -u
 
@@ -227,6 +227,13 @@ fi
 
 CAUSES=()
 add_cause() { CAUSES+=("$1"); }
+# Информационные заметки: факты, которые стоит показать, но которые не являются
+# проблемой (например, ожидаемый NXDOMAIN от локального DNS при split-DNS через VPN).
+NOTES=()
+add_note() { NOTES+=("$1"); }
+# Отказы отдельных DNS-серверов ("server|reason"). Решение, проблема это или
+# ожидаемое поведение split-DNS, принимает classify_dns_server_failures().
+DNS_SERVER_FAILS=()
 
 ask_yes_no() {
   # Возвращает 0 для yes и 1 для no; повторяет запрос до корректного ответа.
@@ -545,6 +552,45 @@ run_scoped_resolver_probes() {
   emit_fact resolver scoped_best_path "$SCOPED_BEST_PATH" "scutil scoped"
 }
 
+classify_dns_server_failures() {
+  # Разделяет отказы отдельных DNS-серверов на ожидаемые и реальные проблемы.
+  # Ожидаемый случай — split-DNS: системный резолвер домен находит (через VPN/utun
+  # или /etc/resolver scope), а остальные серверы (роутер, провайдер) честно
+  # отвечают NXDOMAIN/NODATA, потому что домен им неизвестен. Это не сбой, а
+  # норма, и в "Возможные проблемы" такое попадать не должно.
+  # Таймауты, SERVFAIL, REFUSED и любые отказы при неработающем системном
+  # резолвере по-прежнему считаются проблемами.
+  local item srv reason iface expected_list="" expected=0 unexpected=0
+
+  # ${arr[@]+...}: пустой массив под set -u в bash 3.2 (штатный /bin/bash macOS) иначе падает.
+  for item in ${DNS_SERVER_FAILS[@]+"${DNS_SERVER_FAILS[@]}"}; do
+    srv="${item%%|*}"
+    reason="${item#*|}"
+    if has_fact resolver system_resolver_ok yes && { [ "$reason" = "NXDOMAIN" ] || [ "$reason" = "NODATA" ]; }; then
+      expected=$((expected + 1))
+      iface="$(awk -F'\t' -v s="$srv" '
+        $2=="resolver" && $3=="scoped_probe" && $4 ~ ("(^|;)ns=" s ";") {
+          if (match($4, /iface=[^;]*/)) { v = substr($4, RSTART + 6, RLENGTH - 6); if (v != "na" && v != "unknown") { print v; exit } }
+        }' "$FACTS_FILE")"
+      expected_list="${expected_list:+$expected_list, }$srv${iface:+ ($iface)}"
+    else
+      unexpected=$((unexpected + 1))
+      add_cause "DNS сервер $srv не резолвит $TEST_DOMAIN (A): $reason"
+    fi
+  done
+
+  if [ "$expected" -gt 0 ]; then
+    if [ "$SCOPED_OK_UTUN" -gt 0 ] && [ "$SCOPED_OK_NONUTUN" -eq 0 ]; then
+      add_note "$TEST_DOMAIN резолвится только через VPN (utun); остальные DNS его не знают — ожидаемо для split-DNS: $expected_list"
+    else
+      add_note "DNS серверы не знают $TEST_DOMAIN (NXDOMAIN/NODATA), но системный резолвер его резолвит — ожидаемо для split-DNS: $expected_list"
+    fi
+  fi
+
+  emit_fact resolver dns_server_probe_fail_expected "$expected" "split-dns classification"
+  emit_fact resolver dns_server_probe_fail_unexpected "$unexpected" "split-dns classification"
+}
+
 run_external_dns_probes() {
   # Пробы через заведомо независимые от локальной сети резолверы (1.1.1.1/8.8.8.8):
   # UDP-53, TCP-53 и DoH (443). Позволяет отличить "сломано локально" от "домен
@@ -828,7 +874,11 @@ render_dual_mode_sections() {
 
   resolvers_tested="$(awk -F'\t' '$2=="resolver"&&$3=="dns_server_count"{v=$4} END{if(v=="") v=0; print v}' "$FACTS_FILE")"
   a_ok="$(awk -F'\t' '$2=="resolver"&&$3=="dns_server_probe"&&$4 ~ /rr=A;/&&$4 ~ /result=ok/{c++} END{print c+0}' "$FACTS_FILE")"
-  total_fail="$(awk -F'\t' '$2=="resolver"&&$3=="dns_server_probe_fail"{v=$4} END{if(v=="") v=0; print v}' "$FACTS_FILE")"
+  # Ожидаемые отказы split-DNS (см. classify_dns_server_failures) не деградируют вердикт.
+  total_fail="$(awk -F'\t' '
+    $2=="resolver"&&$3=="dns_server_probe_fail"{all=$4}
+    $2=="resolver"&&$3=="dns_server_probe_fail_unexpected"{u=$4; has_u=1}
+    END{v = has_u ? u : all; if(v=="") v=0; print v}' "$FACTS_FILE")"
   system_ok="$(awk -F'\t' '$2=="resolver"&&$3=="system_resolver_ok"{v=$4} END{if(v=="") v="no"; print v}' "$FACTS_FILE")"
   dominant_failure="$(awk -F'\t' '
     $2=="resolver"&&$3=="dns_server_probe"&&$4 ~ /result=fail/ {
@@ -936,6 +986,7 @@ render_dual_mode_sections() {
     echo "system_resolver_match=no" >> "$OUT"
   fi
   echo "dominant_failure_reason=${dominant_failure:-none}" >> "$OUT"
+  echo "split_dns_expected_fail=$(awk -F'\t' '$2=="resolver"&&$3=="dns_server_probe_fail_expected"{v=$4} END{if(v=="") v=0; print v}' "$FACTS_FILE")" >> "$OUT"
   echo "scoped_resolvers_tested=$SCOPED_TESTED" >> "$OUT"
   echo "scoped_resolvers_ok=$SCOPED_OK" >> "$OUT"
   echo "scoped_resolvers_fail=$SCOPED_FAIL" >> "$OUT"
@@ -1568,7 +1619,7 @@ if command -v dig >/dev/null 2>&1; then
       DNS_OK=$((DNS_OK + 1))
     else
       echo "СБОЙ $s [A] reason=$PROBE_REASON answers=$PROBE_ANS" >> "$OUT"
-      add_cause "DNS сервер $s не резолвит $TEST_DOMAIN (A): $PROBE_REASON"
+      DNS_SERVER_FAILS+=("$s|$PROBE_REASON")
       DNS_FAIL=$((DNS_FAIL + 1))
     fi
     emit_fact resolver dns_server_probe "server=$s;rr=A;result=$PROBE_STATE;reason=$PROBE_REASON;answers=$PROBE_ANS;ips=$PROBE_IPS" "dig"
@@ -1615,7 +1666,7 @@ elif command -v nslookup >/dev/null 2>&1; then
     NS_OUT="$(nslookup -timeout=2 "$TEST_DOMAIN_QUERY" "$s" 2>&1 || true)"
     if printf '%s\n' "$NS_OUT" | grep -Eiq 'NXDOMAIN|SERVFAIL|REFUSED|timed out|no servers could be reached'; then
       echo "СБОЙ $s [A] reason=$(printf '%s\n' "$NS_OUT" | head -1)" >> "$OUT"
-      add_cause "DNS сервер не резолвит $TEST_DOMAIN: $s"
+      DNS_SERVER_FAILS+=("$s|$(nslookup_probe "$TEST_DOMAIN_QUERY" "$s" | cut -d'|' -f2)")
       DNS_FAIL=$((DNS_FAIL + 1))
       emit_fact resolver dns_server_probe "server=$s;rr=MIXED;result=fail;reason=NSLOOKUP_ERROR;answers=0" "nslookup"
     else
@@ -1759,6 +1810,7 @@ if [ -n "${DEFAULT_ROUTE_IF:-}" ] && printf '%s' "$DEFAULT_ROUTE_IF" | grep -q '
 fi
 
 run_scoped_resolver_probes "$SCUTIL_DNS_RAW" "$TEST_DOMAIN_QUERY"
+classify_dns_server_failures
 run_external_dns_probes "$TEST_DOMAIN_QUERY"
 run_cross_resolver_consistency_check
 run_e2e_curl_probe "$TEST_DOMAIN" "$TEST_DOMAIN_QUERY"
@@ -1770,6 +1822,12 @@ if [ "${#CAUSES[@]}" -eq 0 ]; then
   echo "Не найдено явных причин по эвристикам" >> "$OUT"
 else
   for c in "${CAUSES[@]}"; do
+    echo "- $c" >> "$OUT"
+  done
+fi
+if [ "${#NOTES[@]}" -gt 0 ]; then
+  echo -e "\n>> К сведению (не проблемы)" >> "$OUT"
+  for c in "${NOTES[@]}"; do
     echo "- $c" >> "$OUT"
   done
 fi
@@ -1795,6 +1853,13 @@ else
   echo "Возможные проблемы:"
   for c in "${CAUSES[@]}"; do
     echo "- $c"
+  done
+fi
+if [ "${#NOTES[@]}" -gt 0 ]; then
+  echo
+  echo "К сведению (не проблемы):"
+  for c in "${NOTES[@]}"; do
+    echo -e "${CYAN}- $c${RESET}"
   done
 fi
 printf "\n${CYAN}Отчет сохранен в: ${MAGENTA}%s${RESET}\n\n" "$OUT"
