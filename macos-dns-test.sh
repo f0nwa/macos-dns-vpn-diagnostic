@@ -1656,6 +1656,9 @@ else
   done
 fi
 
+# Получаем sudo-сессию до возможной неинтерактивной установки Homebrew.
+start_sudo_keepalive
+
 TEST_DOMAIN_QUERY="$TEST_DOMAIN"
 IDN_PUNY=""
 if printf '%s' "$TEST_DOMAIN" | LC_ALL=C grep -q '[^ -~]'; then
@@ -1752,8 +1755,6 @@ if printf '%s' "$TEST_DOMAIN" | LC_ALL=C grep -q '[^ -~]'; then
     fi
   fi
 fi
-
-start_sudo_keepalive
 
 say_step "1/12 Сбор DNS настроек (scutil)"
 say_step_detail "Снимаем единый snapshot: scutil --dns"
