@@ -1,58 +1,65 @@
-# macOS DNS/VPN Diagnostic Script
+<p align="center">
+  <img src="./assets/readme/hero.svg" width="100%" alt="macOS DNS/VPN diagnostic: один запуск снимает срез сети и показывает, на каком слое (DNS, туннель, TLS…) ломается доступ к домену">
+</p>
 
-**`macos-dns-test.sh`** — интерактивный скрипт для глубокой диагностики DNS, VPN/Proxy и сетевой фильтрации на macOS: снимает полный сетевой срез, проверяет резолвинг домена по каждому пути и через e2e-запрос, и выдаёт классификацию причины с матрицей гипотез и уровнем уверенности.
+<p align="center">
+  <a href="https://github.com/f0nwa/macos-dns-vpn-diagnostic/actions/workflows/ci.yml"><img src="https://github.com/f0nwa/macos-dns-vpn-diagnostic/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License: MIT"></a>
+  <a href="#требования"><img src="https://img.shields.io/badge/platform-macOS-black.svg?style=flat-square" alt="Platform: macOS"></a>
+  <a href="macos-dns-test.sh"><img src="https://img.shields.io/badge/shell-bash_3.2+-4EAA25.svg?style=flat-square&logo=gnubash&logoColor=white" alt="Shell: Bash 3.2+"></a>
+  <a href=".github/workflows/ci.yml"><img src="https://img.shields.io/badge/linted-shellcheck-yellow.svg?style=flat-square" alt="Linted with ShellCheck"></a>
+</p>
 
-[![CI](https://github.com/f0nwa/macos-dns-vpn-diagnostic/actions/workflows/ci.yml/badge.svg)](https://github.com/f0nwa/macos-dns-vpn-diagnostic/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
-[![Platform: macOS](https://img.shields.io/badge/platform-macOS-black.svg?style=flat-square)](#требования)
-[![Shell: Bash](https://img.shields.io/badge/shell-bash-4EAA25.svg?style=flat-square&logo=gnubash&logoColor=white)](macos-dns-test.sh)
-[![Linted with ShellCheck](https://img.shields.io/badge/linted-shellcheck-yellow.svg?style=flat-square)](.github/workflows/ci.yml)
+**`macos-dns-test.sh`** — скрипт для диагностики DNS, VPN/прокси и сетевой фильтрации на macOS. Он снимает полный сетевой срез, проверяет домен по каждому пути резолвинга и сквозным запросом, а затем называет наиболее вероятную причину и слой, на котором ломается доступ. Результат — текстовый отчёт, который можно сразу отправить в поддержку.
 
-Репозиторий: https://github.com/f0nwa/macos-dns-vpn-diagnostic
-
-## Оглавление
-
-- [Что делает и что вы получите](#что-делает-и-что-вы-получите)
 - [Быстрый старт](#быстрый-старт)
-- [Важно](#важно)
+- [Что вы получите](#что-вы-получите)
+- [Как это работает](#как-это-работает)
+- [Доступ к папкам и приватность](#доступ-к-папкам-и-приватность)
 - [Требования](#требования)
-- [Неинтерактивный режим](#неинтерактивный-режим)
+- [Флаги](#флаги)
 - [Для контрибьюторов](#для-контрибьюторов)
-- [License](#license)
 
-## Что делает и что вы получите
+## Быстрый старт
 
-- Запрашивает домен для проверки (кириллица/IDN или латиница).
-- Для IDN-доменов конвертирует в punycode через `python3`; если `python3`/`brew` не найдены — предлагает их установку по подтверждению, либо ручной ввод punycode.
-- Снимает полный сетевой срез: DNS/Proxy-конфигурацию (`scutil`, `networksetup`, `/etc/resolv.conf`, `/etc/hosts`, `/etc/resolver`), состояние PF firewall, активные VPN/Proxy/Filter процессы и system extensions, маршрутизацию, `utun`-интерфейсы и scoped-resolver пути.
-- Обходит все PF-анкеры (включая вложенные `com.apple/*`) и находит правила, уводящие трафик мимо таблицы маршрутизации (`route-to`, `rdr`, `divert-to`).
-- Распознаёт DPI-обходы — ZapretMac (Flowseal), zapret (`tpws`/`dvtws`), SpoofDPI, ByeDPI (`ciadpi`) — по launchd-службам, процессам, путям установки и PF-анкерам; отличает активный инструмент от просто установленного и подсказывает команду остановки. Типичный симптом: DNS в порядке, а TCP к ресурсам за VPN висит до таймаута, потому что перехваченный трафик уходит через шлюз Wi-Fi/Ethernet, а не в туннель.
-- Проверяет резолвинг домена тремя путями: по каждому найденному DNS-серверу, через системный резолвер, через scoped nameserver (по данным `scutil --dns`).
-- Дополнительно резолвит домен через независимые от локальной сети резолверы (Cloudflare/Google, UDP-53, TCP-53 и DoH) и сравнивает их IP-ответы со всеми уже опрошенными системными резолверами — это отличает локальную поломку/подмену DNS от блокировки самого домена снаружи или избирательной фильтрации DNS-порта (можно отключить флагом `--no-external-dns`).
-- Делает e2e-проверку через `curl` (resolve → connect → TLS → HTTP).
-- Формирует итоговую классификацию проблемы и матрицу гипотез с уровнем уверенности.
+```bash
+bash <(curl -fsSL "https://raw.githubusercontent.com/f0nwa/macos-dns-vpn-diagnostic/main/macos-dns-test.sh")
+```
 
-Результат — подробный отчёт в текущей директории: `<user>_<host>_dns_diag_<YYYYMMDD_HHMMSS>.txt`. Основные секции отчёта, на которые стоит смотреть в первую очередь (пример, значения иллюстративные):
+<details>
+<summary>Сначала скачать и посмотреть, потом запустить</summary>
+
+```bash
+curl -fL "https://raw.githubusercontent.com/f0nwa/macos-dns-vpn-diagnostic/main/macos-dns-test.sh" -o /tmp/macos-dns-test.sh
+bash /tmp/macos-dns-test.sh
+```
+
+Из локального клона: `./macos-dns-test.sh`.
+
+</details>
+
+Что будет происходить:
+
+1. Скрипт спросит домен для проверки — латиницей или кириллицей, в формате `name.zone`.
+2. Попросит пароль администратора (`Password:`): часть проверок требует `sudo`.
+3. Для кириллического домена нужен `python3`. Если его нет, скрипт предложит установить `Homebrew + python3` или ввести punycode вручную.
+4. На шаге `7/12` macOS может не пустить скрипт в часть папок `~/Library`. Тогда он покажет эти папки и предложит выдать доступ — подробнее в разделе [«Доступ к папкам и приватность»](#доступ-к-папкам-и-приватность).
+5. В конце откроется Finder с выделенным файлом отчёта — его можно сразу перетащить в мессенджер или письмо.
+
+> [!WARNING]
+> **Перед отправкой отчёта** просмотрите его: там есть внутренние IP, имена хостов, пути и фрагменты системных логов.
+
+## Что вы получите
+
+Отчёт `<user>_<host>_dns_diag_<YYYYMMDD_HHMMSS>.txt` в текущей папке. Начинать чтение стоит с итоговых секций (значения ниже — пример):
 
 ```text
->> DNS_ONLY_RESULT
-domain=example.com
-resolvers_tested=2
-a_ok=1
-system_resolver_match=partial
-dominant_failure_reason=SERVFAIL
-scoped_resolvers_tested=1
-scoped_resolvers_ok=0
-verdict=FAIL
-
 >> E2E_RESULT
 url=https://example.com
 resolve_phase=ok
 connect_phase=ok
 tls_phase=fail
 http_phase=not_run
-host_reachable=yes
-tls_trust_ok=no
 verdict=FAIL
 
 >> PRIMARY_CLASSIFICATION
@@ -64,82 +71,77 @@ HUMAN_STATUS=ТЕСТ ЧАСТИЧНО ПРОЙДЕН: хост доступен
 1. [HIGH/70] TLS certificate untrusted (layer=tls)
    evidence: connect ok, tls handshake fail
    next: проверить сертификат перехватывающего прокси/фильтра
-
->> EVIDENCE_MATRIX
-Symptom | Evidence | Layer | Confidence | Impact | Next check
-...     | ...      | ...   | HIGH/70    | ...    | ...
 ```
 
-Плюс человекочитаемый раздел «Возможные причины проблем с DNS» с итоговым списком гипотез.
+Дальше идут `DNS_ONLY_RESULT` (итог по каждому резолверу), `EVIDENCE_MATRIX` (все гипотезы с доказательствами, уровнем уверенности и следующей проверкой), «Возможные причины проблем с DNS» и «К сведению» — то, что выглядит подозрительно, но проблемой не является (например, NXDOMAIN от локального DNS при split-DNS через VPN). Если какую-то проверку выполнить не удалось, в конце будет блок **«ОТЧЁТ НЕПОЛНЫЙ»** с объяснением.
 
-## Быстрый старт
+## Как это работает
 
-Самый быстрый способ — one-liner (сразу выполнение):
+<p align="center">
+  <img src="./assets/readme/how-it-works.svg" width="100%" alt="Четыре этапа: снимок системы (шаги 1–10), DNS-серверы и маршруты (шаг 11), пути VPN, внешние резолверы и e2e-запрос (шаг 12), вердикт и отчёт">
+</p>
 
-```bash
-bash <(curl -fsSL "https://raw.githubusercontent.com/f0nwa/macos-dns-vpn-diagnostic/main/macos-dns-test.sh")
-```
+**Снимок системы (шаги 1–10).** Настройки DNS и прокси (`scutil`, `networksetup`), PF firewall со всеми анкерами, сетевые расширения и VPN/прокси-процессы, службы launchd, локальные слушатели портов, короткий захват DNS-трафика и логи `mDNSResponder`/NetworkExtension.
+
+**DNS-серверы и маршруты (шаг 11).** Домен проверяется через каждый найденный DNS-сервер (`scutil`, `networksetup`, `/etc/resolv.conf`) и через системный резолвер. Снимаются маршрут по умолчанию, таблица маршрутизации и `utun`-интерфейсы.
+
+**Пути VPN, внешние резолверы и e2e (шаг 12).** Домен проверяется через scoped-резолверы каждого интерфейса, включая VPN (`utun`), с учётом `/etc/resolver` и `/etc/hosts`. Затем — через независимые резолверы Cloudflare и Google (UDP-53, TCP-53, DoH), и их ответы сверяются с системными. Так видно, сломан или подменён DNS локально, заблокирован домен снаружи или фильтруется только порт 53. Затем `curl` проходит всю цепочку: resolve → connect → TLS → HTTP.
+
+**Вердикт.** Собранные факты складываются в гипотезы с оценкой уверенности (HIGH/MED/LOW) по слоям: резолвер, туннель, маршрут, политики PF, перехватчик трафика, TLS, внешняя сеть.
+
+Что скрипт умеет находить сверх обычных проверок:
+
+- **Обходы маршрутизации в PF.** Правила `route-to`, `rdr`, `divert-to` во всех анкерах, включая вложенные `com.apple/*`, которые уводят трафик мимо таблицы маршрутов.
+- **DPI-обходы.** ZapretMac (Flowseal), zapret (`tpws`/`dvtws`), SpoofDPI, ByeDPI (`ciadpi`) — по службам, процессам, путям установки и PF-анкерам. Скрипт отличает запущенный инструмент от просто установленного и подсказывает, как его остановить. Типичный симптом: DNS в порядке, а соединения с ресурсами за VPN висят до таймаута, потому что трафик уходит через Wi-Fi/Ethernet мимо туннеля.
+- **Split-DNS.** Если домен резолвится только через VPN, отказ остальных DNS-серверов не считается проблемой.
+
+## Доступ к папкам и приватность
+
+**Что читается.** Скрипт собирает много системной информации: сетевые настройки, сервисы, процессы, правила firewall, системные логи. На шаге `7/12` он ищет конфиги VPN/прокси-приложений в `~/Library` только **по именам папок** — содержимое файлов не читается, системные папки Apple (`com.apple.*`) и папки с личными данными (Контакты, Календари, Почта и т.п.) пропускаются.
+
+**Если macOS не пустила в папку.** Часть папок `~/Library` (например, `Application Support/FileProvider`, `Caches/CloudKit`) macOS закрывает без какого-либо запроса — открыть их можно только через «Полный доступ к диску». В этом случае скрипт:
+
+1. перечислит недоступные папки и спросит, выдать ли доступ;
+2. откроет «Системные настройки → Конфиденциальность и безопасность → Полный доступ к диску»;
+3. попросит включить `Terminal` (если его нет в списке: «+» → Программы → Утилиты → Terminal) и нажать Enter;
+4. повторит поиск.
 
 > [!TIP]
-> Рекомендуемый вариант — сначала скачать и проверить, потом запустить:
-> ```bash
-> RAW_URL="https://raw.githubusercontent.com/f0nwa/macos-dns-vpn-diagnostic/main/macos-dns-test.sh"
-> curl -fL "$RAW_URL" -o /tmp/macos-dns-test.sh
-> chmod +x /tmp/macos-dns-test.sh
-> bash /tmp/macos-dns-test.sh
-> ```
+> Если macOS предложит завершить Terminal, выберите **«Позже»** — иначе диагностика прервётся. Если доступ не заработал сразу, скрипт попросит перезапустить Terminal и запустить диагностику снова.
 
-Или из локального клона:
+Выдавать доступ не обязательно: диагностика продолжится, а шаг `7/12` будет помечен как неполный в консоли и в отчёте (`APP_CONFIG_SCAN_ACCESS` и блок «ОТЧЁТ НЕПОЛНЫЙ»). Сбросить ранее выданные Terminal разрешения: `tccutil reset All com.apple.Terminal`.
 
-```bash
-chmod +x macos-dns-test.sh
-./macos-dns-test.sh
-```
-
-Как это проходит:
-
-1. Запустите скрипт и введите домен для проверки (кириллица/IDN или латиница) в формате `name.zone`.
-2. Введите локальный пароль администратора, когда скрипт запросит `Password`.
-3. Если `python3`/CLT недоступны для IDN-конвертации — согласитесь на установку `Homebrew + python3`.
-4. Если на шаге `7/12` скрипт сообщит, что macOS не дала доступ к части папок, — согласитесь открыть Системные настройки, включите `Terminal` в «Полный доступ к диску» (на предложение завершить Terminal ответьте «Позже») и нажмите Enter (см. ниже).
-5. Дождитесь завершения всех этапов диагностики и итогового отчёта.
-
-## Важно
-
-> [!WARNING]
-> - Скрипт читает и логирует много системной информации: сеть, сервисы, процессы, правила firewall.
-> - На шаге `7/12` скрипт ищет конфиги VPN/прокси приложений по **именам папок** в `~/Library` (содержимое файлов не читается). Доступ к Apple Music/медиатеке для этого **не нужен**: системные папки Apple (`com.apple.*`) и каталоги под защитой приватности macOS (TCC: Контакты, Календари, Почта и т.п.) пропускаются, поэтому системный запрос «Terminal запрашивает доступ к Apple Music» больше не появляется.
-> - Часть папок в `~/Library` (например, `Application Support/DifferentialPrivacy`, `Application Support/FileProvider`, `Caches/CloudKit`) macOS закрывает **без всякого запроса**: доступ к ним даёт только «Полный доступ к диску», и выдать его можно только вручную. Если такие папки встретились, скрипт перечисляет их в консоли и предлагает выдать доступ сам: открывает «Системные настройки → Конфиденциальность и безопасность → Полный доступ к диску», ждёт, пока вы включите `Terminal` (если его нет в списке: «+» → Программы → Утилиты → Terminal), и повторяет поиск. Если macOS предложит завершить Terminal — выберите «Позже», иначе диагностика прервётся. Иногда доступ начинает действовать только после перезапуска Terminal — тогда скрипт попросит перезапустить его и запустить диагностику снова.
-> - Выдавать доступ не обязательно: без него диагностика продолжится, но шаг `7/12` будет помечен как неполный — в консоли, в секции отчёта `APP_CONFIG_SCAN_ACCESS` и в итоговом блоке «ОТЧЁТ НЕПОЛНЫЙ». С флагом `--yes` и без интерактивного терминала скрипт ничего не спрашивает и не ждёт. Сбросить ранее принятые решения о доступе для Terminal: `tccutil reset All com.apple.Terminal`.
-> - **Перед публикацией отчёта** проверьте файл и удалите чувствительные данные (внутренние IP, имена хостов, пути и т.д.).
-> - Скрипт по умолчанию дополнительно обращается к сторонним публичным DNS/HTTPS-сервисам (Cloudflare `1.1.1.1`/`cloudflare-dns.com`, Google `8.8.8.8`/`dns.google`) для независимой проверки резолвинга; отключается флагом `--no-external-dns`.
+**Внешние запросы.** По умолчанию скрипт обращается к публичным DNS/HTTPS-сервисам Cloudflare (`1.1.1.1`, `cloudflare-dns.com`) и Google (`8.8.8.8`, `dns.google`) для независимой проверки резолвинга. Отключается флагом `--no-external-dns`.
 
 ## Требования
 
-| Компонент | Статус | Комментарий |
+| Компонент | | Комментарий |
 | --- | --- | --- |
-| macOS | обязательно | протестировано на macOS Tahoe 26.0 |
-| `bash` | обязательно | |
-| `sudo` | обязательно | часть проверок требует повышенных прав |
-| `dig` | желательно | при отсутствии используется `nslookup` |
-| `python3` | опционально | для автоматического IDN → punycode |
-| `brew` | опционально | при отсутствии скрипт может установить его сам по подтверждению |
+| macOS | обязательно | проверено на macOS Tahoe 26 |
+| `bash` | обязательно | достаточно системного `/bin/bash` 3.2 |
+| `sudo` | обязательно | часть проверок требует прав администратора |
+| `dig` | желательно | без него используется `nslookup` |
+| `python3` | опционально | для кириллических (IDN) доменов |
+| `brew` | опционально | скрипт может установить его сам после подтверждения |
 
-## Неинтерактивный режим
+## Флаги
 
-Для автоматизации и тестов есть флаги (без флагов поведение полностью прежнее, интерактивное):
+Без флагов скрипт работает интерактивно. Для автоматизации:
 
 ```bash
-./macos-dns-test.sh --domain=ya.ru --yes --output=/tmp/report.txt
+./macos-dns-test.sh --domain=example.com --yes --output=/tmp/report.txt
 ```
 
 | Флаг | Назначение |
 | --- | --- |
-| `--domain=<host>` | не спрашивать домен интерактивно |
-| `--yes` | автоматически отвечать «да» на все y/n запросы (в т.ч. установку Homebrew/python3 для IDN) |
-| `--output=<path>` | писать отчёт в конкретный файл вместо `$(pwd)/<user>_<host>_dns_diag_<ts>.txt` |
-| `--verify-integrity` | перед запуском сверить свой sha256 с `checksums.txt` из репозитория (нужен локальный клон, не работает при `curl \| bash` — см. [«Git-хуки и проверка целостности»](#для-контрибьюторов)) |
-| `--no-external-dns` | не делать дополнительные запросы к независимым внешним DNS/DoH (1.1.1.1, 8.8.8.8, Cloudflare/Google DoH) — например, если это нежелательно по соображениям приватности |
+| `--domain=<host>` | не спрашивать домен |
+| `--yes` | отвечать «да» на все вопросы (в т.ч. установку Homebrew/python3) и не задавать вопросов о доступе к папкам |
+| `--output=<path>` | путь к файлу отчёта вместо `./<user>_<host>_dns_diag_<ts>.txt` |
+| `--no-external-dns` | не обращаться к внешним DNS/DoH (Cloudflare, Google) |
+| `--no-open` | не открывать Finder с отчётом после завершения |
+| `--verify-integrity` | перед запуском сверить sha256 скрипта с `checksums.txt` (только из локального клона, см. ниже) |
+
+Без интерактивного терминала и в CI скрипт не предлагает выдать доступ к папкам и не открывает Finder.
 
 ## Для контрибьюторов
 
@@ -148,42 +150,44 @@ chmod +x macos-dns-test.sh
 
 ### Тесты и линтинг
 
-Тесты лежат в `tests/` и написаны на [bats-core](https://github.com/bats-core/bats-core):
+Тесты на [bats-core](https://github.com/bats-core/bats-core) лежат в `tests/`. Они берут функции прямо из `macos-dns-test.sh` (`tests/lib/extract.bash`), поэтому всегда проверяют актуальный код.
 
 ```bash
-brew install bats-core shellcheck
+brew install bats-core shellcheck bash
 shellcheck -S warning macos-dns-test.sh scripts/*.sh
 bats tests/*.bats
 ```
 
-- `tests/regex_regression.bats` — регрессия на баг с двойным бэкслешем в regex разбора `scutil --dns` (см. историю коммитов).
-- `tests/hypotheses.bats` — движок гипотез (`build_hypotheses`/`confidence_label`) на синтетических наборах фактов.
-- `tests/cli_flags.bats` — неинтерактивный режим, включая полный прогон скрипта целиком.
-- `tests/dpi_bypass.bats` — разбор PF-перенаправлений по анкерам и сигнатуры DPI-обходов (фикстуры `tests/fixtures/pf_anchors_*.txt`).
-- `tests/report_capture.bats` — регрессия: `tcpdump` под `sudo` не должен дописывать пакеты в отчёт после таймаута.
+> [!NOTE]
+> Под системным `/bin/bash` 3.2 bats не находит тесты с кириллицей в названии (`bats: unknown test name`), поэтому сам bats нужно запускать под bash из Homebrew. Полный прогон скрипта в `cli_flags.bats` при этом всё равно идёт под `/bin/bash` — как у пользователей.
 
-Тесты вытаскивают функции прямо из `macos-dns-test.sh` (`tests/lib/extract.bash`), а не дублируют их копией, — так тест всегда проверяет актуальный код.
+| Файл | Что проверяет |
+| --- | --- |
+| `cli_flags.bats` | флаги и полный неинтерактивный прогон скрипта |
+| `hypotheses.bats` | движок гипотез и уровни уверенности |
+| `split_dns.bats` | NXDOMAIN от локального DNS при split-DNS через VPN |
+| `external_consistency.bats` | сверка ответов внешних и системных резолверов |
+| `dpi_bypass.bats` | PF-перенаправления в анкерах и сигнатуры DPI-обходов |
+| `app_config_scan.bats` | поиск конфигов на шаге 7, недоступные папки и запрос доступа |
+| `regex_regression.bats` | разбор `scutil --dns` |
+| `report_capture.bats` | `tcpdump` не дописывает пакеты в отчёт после таймаута |
+| `spinner.bats` | спиннер не зависает и не печатает предупреждения bash 3.2 |
+| `reveal_report.bats` | открытие Finder с отчётом и случаи, когда этого делать нельзя |
 
-CI (`.github/workflows/ci.yml`) гоняет то же самое на `macos-latest` при каждом push/PR.
+CI (`.github/workflows/ci.yml`) запускает ShellCheck и все тесты на `macos-latest` при каждом push и PR.
 
-### Git-хуки и проверка целостности (опционально)
+### Git-хуки и проверка целостности
 
 ```bash
 ./scripts/install-git-hooks.sh
 ```
 
-Включает `.githooks/pre-commit`, который при коммите `macos-dns-test.sh`:
+Хук `.githooks/pre-commit` при коммите `macos-dns-test.sh` обновляет дату в `# Last Modified:` и пересчитывает `checksums.txt`.
 
-1. обновляет `# Last Modified:` на сегодняшнюю дату;
-2. пересчитывает `checksums.txt` (`scripts/generate-checksums.sh`).
-
-`checksums.txt` используется флагом `--verify-integrity`: скрипт хэширует сам себя (sha256) и сверяет с опубликованной в репозитории записью — это защищает **локальный клон** от случайной порчи файла. Для строгой защиты от подмены на raw.githubusercontent.com (MITM) `scripts/integrity-lib.sh` поддерживает и `minisign`-подпись (`VERIFY_MODE=strict` + `DNS_DIAG_MINISIGN_PUBKEY`), но ключи подписи в этом репозитории пока не заведены.
-
-> [!NOTE]
-> `--verify-integrity` требует, чтобы `scripts/integrity-lib.sh` лежал рядом со скриптом — то есть работает только при локальном клоне/скачивании репозитория, **не** при однострочном `curl | bash` из README (туда скачивается только сам `macos-dns-test.sh`).
+`--verify-integrity` хэширует скрипт и сверяет результат с `checksums.txt` — это защищает локальный клон от случайной порчи. Флаг работает только если рядом со скриптом лежит `scripts/integrity-lib.sh`, то есть не при запуске через `curl`. Для защиты от подмены при скачивании `integrity-lib.sh` поддерживает подпись `minisign` (`VERIFY_MODE=strict` + `DNS_DIAG_MINISIGN_PUBKEY`), но ключи подписи в репозитории пока не заведены.
 
 </details>
 
-## License
+## Лицензия
 
-MIT. См. файл [`LICENSE`](LICENSE).
+MIT — см. [`LICENSE`](LICENSE).
