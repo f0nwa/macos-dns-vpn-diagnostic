@@ -1136,13 +1136,22 @@ scan_app_config_paths() {
   rm -f "$out_file" "$err_file"
 }
 
-# Подсказка, как вернуть доступ, если пользователь ранее отказал в запросе macOS.
-# macOS запоминает отказ и повторно не спрашивает — помогает только ручное
-# включение в настройках или сброс решения через tccutil.
+# Имя приложения-терминала для подсказок (TERM_PROGRAM у Terminal.app = Apple_Terminal).
+terminal_app_name() {
+  case "${TERM_PROGRAM:-}" in
+    ""|Apple_Terminal) printf 'Terminal' ;;
+    iTerm.app) printf 'iTerm' ;;
+    *) printf '%s' "$TERM_PROGRAM" ;;
+  esac
+}
+
+# Подсказка, как открыть доступ. Скрипт не может отличить «пользователь отказал в
+# запросе» от «папка защищена системой и запрос не показывается вовсе» — поэтому
+# объясняем оба случая. В обоих macOS сама повторно не спросит.
 tcc_recovery_hint() {
-  local app="${TERM_PROGRAM:-Terminal}" bundle="${__CFBundleIdentifier:-}"
-  [ "$app" = "Apple_Terminal" ] && app="Terminal"
-  printf '%s' "macOS запоминает отказ и сама повторно не спросит. Чтобы дать доступ: Системные настройки → Конфиденциальность и безопасность → «Медиа и Apple Music» (или «Файлы и папки» / «Полный доступ к диску») → включить ${app}; либо сбросить прошлое решение командой: tccutil reset MediaLibrary${bundle:+ $bundle} — и перезапустить скрипт, тогда запрос появится снова"
+  local app bundle="${__CFBundleIdentifier:-}"
+  app="$(terminal_app_name)"
+  printf '%s' "Если ранее вы отказали в запросе — macOS повторно не спросит. Если запроса не было — папка защищена системой. В обоих случаях: Системные настройки → Конфиденциальность и безопасность → «Полный доступ к диску» → включить ${app} и перезапустить скрипт (сброс прошлых решений: tccutil reset All${bundle:+ $bundle})"
 }
 
 # Фиксирует результат обхода шага 7 в отчёте/фактах и, если macOS не пустила
@@ -1162,7 +1171,20 @@ report_app_scan_access() {
   emit_fact coverage app_config_scan incomplete "find ~/Library,/Applications"
   shown="$(join_by_semicolon "${APP_SCAN_DENIED[@]:0:3}")"
   [ "$denied_count" -gt 3 ] && shown="$shown; ... (всего $denied_count)"
-  add_coverage_gap "Шаг 7/12 (конфиги приложений): macOS не предоставила доступ к папкам — $shown. Поиск конфигов VPN/прокси выполнен не полностью. $(tcc_recovery_hint)"
+  add_coverage_gap "Шаг 7/12 (конфиги приложений): macOS не дала доступ к папкам — $shown. Поиск конфигов VPN/прокси в них не выполнен. $(tcc_recovery_hint)"
+}
+
+# Вывод в консоль после шага 7: какие папки недоступны и что с этим делать.
+print_app_scan_denied() {
+  local d
+  [ "${#APP_SCAN_DENIED[@]}" -gt 0 ] || return 0
+  stop_step_spinner
+  printf "  %smacOS не дала доступ к папкам (%s шт.) — поиск конфигов неполный, это отмечено в отчёте:%s\n" "$YELLOW" "${#APP_SCAN_DENIED[@]}" "$RESET"
+  for d in "${APP_SCAN_DENIED[@]:0:5}"; do
+    printf "    %s%s%s\n" "$YELLOW" "${d/#"$HOME"/\~}" "$RESET"
+  done
+  [ "${#APP_SCAN_DENIED[@]}" -gt 5 ] && printf "    %s... и ещё %s (см. отчёт)%s\n" "$YELLOW" "$(( ${#APP_SCAN_DENIED[@]} - 5 ))" "$RESET"
+  printf "  %s%s%s\n" "$YELLOW" "$(tcc_recovery_hint)" "$RESET"
 }
 
 detect_dpi_bypass() {
@@ -1757,9 +1779,8 @@ else
 fi
 
 say_step "7/12 Конфиги приложений"
-printf "  %smacOS может спросить доступ для %s (например, к «Apple Music/медиатеке», «Контактам»).%s\n" "$YELLOW" "${TERM_PROGRAM:-Terminal}" "$RESET"
-printf "  %sЗачем: шаг ищет конфиги VPN/прокси приложений в ~/Library по именам папок; содержимое файлов и медиатеку скрипт не читает.%s\n" "$YELLOW" "$RESET"
-printf "  %sРазрешите доступ для полной проверки. При отказе шаг будет помечен в отчёте как неполный.%s\n" "$YELLOW" "$RESET"
+printf "  %sИщем конфиги VPN/прокси по именам папок в ~/Library (содержимое не читается).%s\n" "$YELLOW" "$RESET"
+printf "  %sЕсли macOS спросит доступ для %s — разрешите, иначе шаг будет помечен как неполный.%s\n" "$YELLOW" "$(terminal_app_name)" "$RESET"
 say_step_detail "Сканируем типовые пути конфигов VPN/Proxy приложений"
 say_step_detail "Ищем DPI-обходы (ZapretMac, zapret, SpoofDPI, ByeDPI)"
 # 7. Конфиги приложений (папки)
@@ -1768,11 +1789,7 @@ echo -e "\n>> Конфиги приложений" >> "$OUT"
 scan_app_config_paths "$APPS_PATHS" ~/Library/Preferences ~/Library/Application\ Support ~/Library/Caches /Applications
 printf '%s\n' "$APP_CONFIG_PATHS" >> "$OUT"
 report_app_scan_access
-if [ "${#APP_SCAN_DENIED[@]}" -gt 0 ]; then
-  stop_step_spinner
-  printf "  %sДоступ к части папок не предоставлен (%s шт.) — поиск конфигов неполный, это отмечено в отчёте.%s\n" "$YELLOW" "${#APP_SCAN_DENIED[@]}" "$RESET"
-  printf "  %s%s%s\n" "$YELLOW" "$(tcc_recovery_hint)" "$RESET"
-fi
+print_app_scan_denied
 
 # DPI-обходы (zapret и аналоги): сопоставляем launchd, процессы, пути и PF-анкеры.
 DPI_INSTALL_PATHS="$(

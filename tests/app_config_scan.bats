@@ -8,7 +8,7 @@ load 'lib/extract'
 APPS_RE='clash|wireguard|tailscale'
 
 setup() {
-  source_fns emit_fact has_fact join_by_semicolon scan_app_config_paths tcc_recovery_hint report_app_scan_access
+  source_fns emit_fact has_fact join_by_semicolon scan_app_config_paths terminal_app_name tcc_recovery_hint report_app_scan_access print_app_scan_denied
   # Однострочные определения из скрипта extract_fn не вытащит — дублируем.
   add_coverage_gap() { COVERAGE_GAPS+=("$1"); }
   APP_SCAN_PRUNE_NAMES=('com.apple.*' AddressBook Calendars CallHistoryDB CallHistoryTransactions CloudDocs FaceTime Knowledge Mail Messages MobileSync Safari)
@@ -65,15 +65,17 @@ fact_value() {
   [ "${#COVERAGE_GAPS[@]}" -eq 0 ]
 }
 
-@test "report: при отказе macOS — access=denied, факт incomplete, подсказка про tccutil" {
+@test "report: при отказе macOS — access=denied, факт incomplete, подсказка про «Полный доступ к диску»" {
   APP_SCAN_DENIED=("/Users/u/Library/Application Support/X" "/Users/u/Library/Caches/Y")
   __CFBundleIdentifier=com.apple.Terminal TERM_PROGRAM=Apple_Terminal report_app_scan_access
   grep -q '^access=denied denied_count=2$' "$OUT"
   grep -q '^denied: /Users/u/Library/Caches/Y$' "$OUT"
-  grep -q 'tccutil reset MediaLibrary com.apple.Terminal' "$OUT"
+  grep -q 'Полный доступ к диску» → включить Terminal' "$OUT"
+  grep -q 'tccutil reset All com.apple.Terminal' "$OUT"
+  ! grep -q 'Apple_Terminal' "$OUT"
   [ "$(fact_value coverage app_config_scan)" = "incomplete" ]
   [ "${#COVERAGE_GAPS[@]}" -eq 1 ]
-  [[ "${COVERAGE_GAPS[0]}" == *"Шаг 7/12"*"не предоставила доступ"* ]]
+  [[ "${COVERAGE_GAPS[0]}" == *"Шаг 7/12"*"не дала доступ"* ]]
   [[ "${COVERAGE_GAPS[0]}" == *"включить Terminal"* ]]
 }
 
@@ -84,4 +86,26 @@ fact_value() {
   [ "$(grep -c '^denied: /p/' "$OUT")" -eq 10 ]
   grep -q '^denied: ... и ещё 2$' "$OUT"
   [[ "${COVERAGE_GAPS[0]}" == *"(всего 12)"* ]]
+}
+
+@test "console: показывает недоступные папки (с ~ вместо \$HOME) и подсказку; без отказов — молчит" {
+  stop_step_spinner() { :; }
+  YELLOW=""; RESET=""
+  APP_SCAN_DENIED=()
+  run print_app_scan_denied
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  APP_SCAN_DENIED=("$HOME/Library/Caches/X" "/Library/Y")
+  TERM_PROGRAM=Apple_Terminal run print_app_scan_denied
+  [[ "$output" == *"(2 шт.)"* ]]
+  [[ "$output" == *"~/Library/Caches/X"* ]]
+  [[ "$output" == *"/Library/Y"* ]]
+  [[ "$output" == *"включить Terminal"* ]]
+  [[ "$output" != *"Apple_Terminal"* ]]
+}
+
+@test "terminal_app_name: Apple_Terminal -> Terminal, iTerm.app -> iTerm" {
+  [ "$(TERM_PROGRAM=Apple_Terminal terminal_app_name)" = "Terminal" ]
+  [ "$(TERM_PROGRAM=iTerm.app terminal_app_name)" = "iTerm" ]
+  [ "$(TERM_PROGRAM= terminal_app_name)" = "Terminal" ]
 }
