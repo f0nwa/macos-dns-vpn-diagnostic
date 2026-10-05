@@ -10,6 +10,13 @@ on:
 jobs:
   lint-and-test:
     runs-on: macos-latest
+    # UTF-8 локаль обязательна: имена тестов на кириллице. В локали раннера по
+    # умолчанию (C/POSIX) байты 0x80–0x9F из UTF-8 (буквы р, с, т, у, х, ы и т.п.)
+    # считаются непечатаемыми, bats кодирует имя теста иначе, чем потом ищет его,
+    # и падает с "bats: unknown test name" — такие тесты просто не запускаются.
+    env:
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
     steps:
       - uses: actions/checkout@v4
 
@@ -32,4 +39,7 @@ jobs:
 
       - name: Run bats test suite
         run: |
+          locale
+          bash --version | head -1
+          bats --version
           bats tests/*.bats
