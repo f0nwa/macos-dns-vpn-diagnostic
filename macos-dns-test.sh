@@ -10,6 +10,7 @@ FLAG_YES=0
 FLAG_OUTPUT=""
 FLAG_VERIFY_INTEGRITY=0
 FLAG_NO_EXTERNAL_DNS=0
+FLAG_NO_OPEN=0
 for _arg in "$@"; do
   case "$_arg" in
     --domain=*) FLAG_DOMAIN="${_arg#--domain=}" ;;
@@ -17,9 +18,10 @@ for _arg in "$@"; do
     --output=*) FLAG_OUTPUT="${_arg#--output=}" ;;
     --verify-integrity) FLAG_VERIFY_INTEGRITY=1 ;;
     --no-external-dns) FLAG_NO_EXTERNAL_DNS=1 ;;
+    --no-open) FLAG_NO_OPEN=1 ;;
     -h|--help)
       cat <<'USAGE'
-Usage: macos-dns-test.sh [--domain=<host>] [--yes] [--output=<path>] [--verify-integrity] [--no-external-dns]
+Usage: macos-dns-test.sh [--domain=<host>] [--yes] [--output=<path>] [--verify-integrity] [--no-external-dns] [--no-open]
 
   --domain=<host>       Пропустить интерактивный ввод, тестировать этот домен.
   --yes                 Автоматически подтверждать все y/n запросы (в т.ч. установку Homebrew/python3).
@@ -30,6 +32,7 @@ Usage: macos-dns-test.sh [--domain=<host>] [--yes] [--output=<path>] [--verify-i
                         недоступна, см. README).
   --no-external-dns     Не делать дополнительные запросы к независимым внешним DNS/DoH
                         (1.1.1.1, 8.8.8.8, Cloudflare/Google DoH).
+  --no-open             Не открывать Finder с выделенным отчётом после завершения.
 
 Без флагов скрипт работает как раньше, в интерактивном режиме.
 USAGE
@@ -1234,6 +1237,25 @@ request_app_scan_access() {
   fi
 }
 
+# После завершения открывает Finder с выделенным файлом отчёта, чтобы его было
+# удобно отправить (перетащить в мессенджер/почту). Только в интерактивном
+# запуске: без TTY, в CI и с --no-open ничего не делает. При запуске через sudo
+# Finder открываем от имени пользователя, иначе `open` под root не попадёт в его сессию.
+reveal_report_in_finder() {
+  local report="$1"
+  [ "${FLAG_NO_OPEN:-0}" = "1" ] && return 0
+  [ -n "${CI:-}" ] && return 0
+  [ -t 1 ] || [ "${REVEAL_FORCE_INTERACTIVE:-0}" = "1" ] || return 0
+  [ -f "$report" ] || return 0
+  command -v open >/dev/null 2>&1 || return 0
+  if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+    sudo -u "$SUDO_USER" open -R "$report" >/dev/null 2>&1 || return 0
+  else
+    open -R "$report" >/dev/null 2>&1 || return 0
+  fi
+  printf "%sОтчёт выделен в Finder — его можно перетащить в мессенджер или письмо.%s\n\n" "$CYAN" "$RESET"
+}
+
 detect_dpi_bypass() {
   # Ищет DPI-обходы (zapret и аналоги) по совокупности признаков и PF-перенаправления.
   #   $1 — launchd: строки `launchctl list` ("PID<TAB>status<TAB>label") и пути plist
@@ -2296,3 +2318,4 @@ if [ "${#COVERAGE_GAPS[@]}" -gt 0 ]; then
   done
 fi
 printf "\n${CYAN}Отчет сохранен в: ${MAGENTA}%s${RESET}\n\n" "$OUT"
+reveal_report_in_finder "$OUT"
