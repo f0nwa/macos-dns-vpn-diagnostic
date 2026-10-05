@@ -115,8 +115,19 @@ start_step_spinner() {
   SPINNER_PID=$!
 }
 stop_step_spinner() {
+  local n=0
   if [ -n "${SPINNER_PID:-}" ] && kill -0 "$SPINNER_PID" 2>/dev/null; then
-    kill "$SPINNER_PID" 2>/dev/null || true
+    # Если спиннер остановлен (SIGSTOP/SIGTTOU — например, терминал на время
+    # отдали другой группе процессов), TERM не доставится, а `wait` повиснет
+    # навсегда: шаг «замирает» на первом кадре спиннера. Поэтому сначала
+    # будим (CONT), ждём до ~1с и добиваем KILL — после него `wait` не зависнет.
+    kill -CONT "$SPINNER_PID" 2>/dev/null || true
+    kill -TERM "$SPINNER_PID" 2>/dev/null || true
+    while kill -0 "$SPINNER_PID" 2>/dev/null && [ "$n" -lt 10 ]; do
+      sleep 0.1
+      n=$((n + 1))
+    done
+    kill -KILL "$SPINNER_PID" 2>/dev/null || true
     wait "$SPINNER_PID" 2>/dev/null || true
   fi
   SPINNER_PID=""
@@ -1185,10 +1196,11 @@ print_app_scan_denied() {
 }
 
 print_app_scan_denied_paths() {
-  local d
+  # Тильда через переменную: в bash 3.2 (macOS) "\~" в замене оставляет обратный слэш.
+  local d tilde='~'
   printf "  %smacOS не дала доступ к папкам (%s шт.):%s\n" "$YELLOW" "${#APP_SCAN_DENIED[@]}" "$RESET"
   for d in "${APP_SCAN_DENIED[@]:0:5}"; do
-    printf "    %s%s%s\n" "$YELLOW" "${d/#"$HOME"/\~}" "$RESET"
+    printf "    %s%s%s\n" "$YELLOW" "${d/#"$HOME"/$tilde}" "$RESET"
   done
   [ "${#APP_SCAN_DENIED[@]}" -gt 5 ] && printf "    %s... и ещё %s (см. отчёт)%s\n" "$YELLOW" "$(( ${#APP_SCAN_DENIED[@]} - 5 ))" "$RESET"
   return 0

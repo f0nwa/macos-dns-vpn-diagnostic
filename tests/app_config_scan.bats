@@ -99,6 +99,7 @@ fact_value() {
   TERM_PROGRAM=Apple_Terminal run print_app_scan_denied
   [[ "$output" == *"(2 шт.)"* ]]
   [[ "$output" == *"~/Library/Caches/X"* ]]
+  [[ "$output" != *"\\~"* ]]
   [[ "$output" == *"/Library/Y"* ]]
   [[ "$output" == *"включить Terminal"* ]]
   [[ "$output" != *"Apple_Terminal"* ]]
