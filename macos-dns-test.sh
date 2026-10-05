@@ -102,8 +102,8 @@ start_step_spinner() {
   else
     display_message="$message"
   fi
+  # Без собственного trap: спиннер завершается только KILL (см. stop_step_spinner).
   (
-    trap 'exit 0' TERM INT
     local i=0
     local frames='|/-\'
     while :; do
@@ -115,18 +115,13 @@ start_step_spinner() {
   SPINNER_PID=$!
 }
 stop_step_spinner() {
-  local n=0
   if [ -n "${SPINNER_PID:-}" ] && kill -0 "$SPINNER_PID" 2>/dev/null; then
-    # Если спиннер остановлен (SIGSTOP/SIGTTOU — например, терминал на время
-    # отдали другой группе процессов), TERM не доставится, а `wait` повиснет
-    # навсегда: шаг «замирает» на первом кадре спиннера. Поэтому сначала
-    # будим (CONT), ждём до ~1с и добиваем KILL — после него `wait` не зависнет.
-    kill -CONT "$SPINNER_PID" 2>/dev/null || true
-    kill -TERM "$SPINNER_PID" 2>/dev/null || true
-    while kill -0 "$SPINNER_PID" 2>/dev/null && [ "$n" -lt 10 ]; do
-      sleep 0.1
-      n=$((n + 1))
-    done
+    # Только KILL, не TERM:
+    # - подоболочка наследует глобальный `trap ... TERM`; если TERM приходит в
+    #   первые мгновения после fork (подряд идущие say_step_detail), bash 3.2
+    #   печатает "run_pending_traps: bad value in trap_list[15]: 0x0";
+    # - остановленный (SIGSTOP/SIGTTOU) процесс TERM не получит, и `wait`
+    #   повиснет навсегда, а KILL доставляется и остановленному процессу.
     kill -KILL "$SPINNER_PID" 2>/dev/null || true
     wait "$SPINNER_PID" 2>/dev/null || true
   fi
@@ -162,7 +157,9 @@ run_with_timeout() {
   local watchdog_pid=$!
   wait "$cmd_pid" 2>/dev/null
   local rc=$?
-  kill "$watchdog_pid" 2>/dev/null
+  # KILL, а не TERM: сторож наследует глобальный trap TERM, и ранний TERM
+  # в bash 3.2 даёт "run_pending_traps: bad value in trap_list[15]".
+  kill -KILL "$watchdog_pid" 2>/dev/null
   wait "$watchdog_pid" 2>/dev/null
   return "$rc"
 }
