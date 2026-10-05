@@ -7,7 +7,7 @@
 load 'lib/extract'
 
 setup() {
-  source_fns join_by_semicolon has_fact add_hypothesis confidence_label build_hypotheses
+  source_fns join_by_semicolon has_fact ip_is_private system_resolver_ips system_resolver_ips_all_private add_hypothesis confidence_label build_hypotheses
   FACTS_FILE="$(mktemp)"
 }
 
@@ -163,4 +163,47 @@ write_facts() {
   IFS='|' read -r score layer _ <<< "${HYPOTHESES[0]}"
   [ "$layer" = "route" ]
   [ "$score" -eq 25 ]
+}
+
+@test "активный DPI-обход + route-to + DNS ok, но connect к приватному адресу падает -> топ-гипотеза dpi_bypass HIGH" {
+  # Факты из реального отчёта: ZapretMac + корпоративный VPN, help.crpt.ru -> 10.200.60.201.
+  write_facts \
+    $'1\tpolicy\tpf_enabled\tyes\ttest' \
+    $'1\tinterceptor\tdpi_bypass_present\tyes\ttest' \
+    $'1\tinterceptor\tdpi_bypass_active\tyes\ttest' \
+    $'1\tinterceptor\tdpi_bypass_tool\tid=zapretmac;title=ZapretMac (Flowseal);active=yes;evidence=launchd,process,pf_anchor;stop=sudo "/Library/Application Support/ZapretMac/stop.sh"\ttest' \
+    $'1\tpolicy\tpf_traffic_redirect\tyes\ttest' \
+    $'1\tpolicy\tpf_traffic_redirect_rule\tcom.apple/zapret-macos|route-to|utun50 10.77.0.2\ttest' \
+    $'1\tresolver\tsystem_resolver_ok\tyes\ttest' \
+    $'1\tresolver\tsystem_probe\trr=A;result=ok;reason=NOERROR;answers=1;ips=10.200.60.201\ttest' \
+    $'1\te2e\tresolve_phase\tok\ttest' \
+    $'1\te2e\tconnect_phase\tfail\ttest' \
+    $'1\texternal\tprobe_skipped\tno\ttest' \
+    $'1\texternal\tany_ok\tno\ttest' \
+    $'1\texternal\tall_timeout\tno\ttest' \
+    $'1\texternal\tinternal_domain_expected\tyes\ttest'
+  HYPOTHESES=()
+  build_hypotheses
+  top="$(printf '%s\n' "${HYPOTHESES[@]}" | sort -t'|' -k1,1nr | head -1)"
+  IFS='|' read -r score layer symptom evidence _ next <<< "$top"
+  [ "$layer" = "dpi_bypass" ]
+  [ "$score" -le 100 ]
+  [ "$(confidence_label "$score")" = "HIGH" ]
+  [[ "$evidence" == *"ZapretMac"* ]]
+  [[ "$evidence" == *"utun50"* ]]
+  [[ "$next" == *"stop.sh"* ]]
+  # Внутренний домен: NXDOMAIN у внешних резолверов — не повод для external-гипотезы.
+  ! printf '%s\n' "${HYPOTHESES[@]}" | grep -q '|external|'
+}
+
+@test "DPI-обход лишь установлен (не активен, перенаправлений нет) -> гипотезы dpi_bypass нет" {
+  write_facts \
+    $'1\tinterceptor\tdpi_bypass_present\tyes\ttest' \
+    $'1\tinterceptor\tdpi_bypass_active\tno\ttest' \
+    $'1\tpolicy\tpf_traffic_redirect\tno\ttest' \
+    $'1\te2e\tresolve_phase\tok\ttest' \
+    $'1\te2e\tconnect_phase\tfail\ttest'
+  HYPOTHESES=()
+  build_hypotheses
+  ! printf '%s\n' "${HYPOTHESES[@]}" | grep -q '|dpi_bypass|'
 }

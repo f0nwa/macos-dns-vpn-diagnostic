@@ -1,0 +1,7 @@
+anchor=
+scrub-anchor "com.apple/*" all fragment reassemble
+anchor "com.apple/*" all
+anchor=com.apple
+anchor "250.ApplicationFirewall/*" all
+anchor=com.apple/250.ApplicationFirewall
+block drop in quick proto tcp from any to any port = 31337

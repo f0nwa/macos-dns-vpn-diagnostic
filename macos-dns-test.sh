@@ -1,7 +1,7 @@
 #!/bin/bash
 # Description: Полная диагностика DNS/VPN/Proxy на macOS с классификацией причин и e2e-проверкой.
 # Author: f0nwa
-# Last Modified: 2026-10-01
+# Last Modified: 2026-10-05
 
 set -u
 
@@ -1028,6 +1028,213 @@ render_dual_mode_sections() {
   echo "HUMAN_STATUS=$human_status" >> "$OUT"
 }
 
+collect_pf_anchor_rules() {
+  # Полный дамп PF по всем анкерам (включая вложенные вида com.apple/<имя>).
+  # Обычный `pfctl -s rules` показывает только `anchor "com.apple/*"` и прячет
+  # содержимое — именно туда, например, ZapretMac кладёт свой route-to.
+  # Формат: строка "anchor=<имя>" (пусто = главный набор), затем nat/rdr и filter-правила.
+  local anchors a
+  echo "anchor="
+  run_sudo pfctl -s nat 2>/dev/null
+  run_sudo pfctl -s rules 2>/dev/null
+  # Явно добавляем анкеры известных DPI-обходов: на случай, если список анкеров
+  # пуст/урезан (старые macOS, нестандартный pf.conf).
+  anchors="$({ run_sudo pfctl -s Anchors -v 2>/dev/null | sed 's/^[[:space:]]*//'; printf '%s\n' com.apple/zapret-macos zapret; } | awk 'NF && !seen[$0]++')"
+  while IFS= read -r a; do
+    [ -z "$a" ] && continue
+    echo "anchor=$a"
+    run_sudo pfctl -a "$a" -s nat 2>/dev/null
+    run_sudo pfctl -a "$a" -s rules 2>/dev/null
+  done <<< "$anchors"
+}
+
+parse_pf_redirect_rules() {
+  # stdin: вывод collect_pf_anchor_rules.
+  # stdout: уникальные записи "anchor|kind|target", где kind — route-to|reply-to|dup-to|rdr|divert-to|divert-packet.
+  # Такие правила меняют путь пакета в обход таблицы маршрутизации (а значит, и VPN).
+  # nat и rdr из Internet Sharing (com.apple.internet-sharing) — штатные, их пропускаем.
+  awk '
+    function emit(a, k, t,   key) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
+      key = a "|" k "|" t
+      if (!(key in seen)) { seen[key] = 1; print key }
+    }
+    /^anchor=/ { anchor = substr($0, 8); if (anchor == "") anchor = "main"; next }
+    anchor ~ /internet-sharing/ { next }
+    /^[[:space:]]*rdr[[:space:]]/ && /->/ {
+      t = $0
+      sub(/.*->[[:space:]]*/, "", t)
+      sub(/[[:space:]]+(round-robin|random|source-hash|bitmask|static-port).*$/, "", t)
+      emit(anchor, "rdr", t)
+      next
+    }
+    match($0, /(route-to|reply-to|dup-to)[[:space:]]+\([^)]*\)/) {
+      s = substr($0, RSTART, RLENGTH)
+      k = s; sub(/[[:space:]].*/, "", k)
+      t = s; sub(/^[^(]*\(/, "", t); sub(/\)$/, "", t)
+      emit(anchor, k, t)
+      next
+    }
+    match($0, /divert-(to|packet)[[:space:]]+[^[:space:]]+([[:space:]]+port[[:space:]]+[^[:space:]]+)?/) {
+      s = substr($0, RSTART, RLENGTH)
+      k = s; sub(/[[:space:]].*/, "", k)
+      t = s; sub(/^[^[:space:]]+[[:space:]]+/, "", t)
+      emit(anchor, k, t)
+      next
+    }
+  '
+}
+
+dpi_bypass_signatures() {
+  # Сигнатуры DPI-обходов для macOS. Поля через TAB (пустое поле = "-"):
+  # id, название, launchd ERE, имя процесса ERE (целиком), путь ERE, анкер PF ERE, как остановить.
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    zapretmac 'ZapretMac (Flowseal)' 'io\.github\.flowseal\.zapretmac' 'utunws' 'ZapretMac' '(^|/)zapret-macos$' \
+      'sudo "/Library/Application Support/ZapretMac/stop.sh"' \
+    zapret 'zapret (bol-van: tpws/dvtws + PF)' '(^|[/.[:space:]])zapret(\.plist)?([[:space:]]|$)' 'tpws|dvtws|nfqws' '^/opt/zapret' '^zapret(/|$)' \
+      'sudo /opt/zapret/init.d/macos/zapret stop' \
+    spoofdpi 'SpoofDPI (локальный HTTP-прокси)' 'spoofdpi' 'spoofdpi' 'spoofdpi' '-' \
+      'brew services stop spoofdpi (и выключить системный прокси на 127.0.0.1)' \
+    byedpi 'ByeDPI (ciadpi, локальный SOCKS-прокси)' 'byedpi|ciadpi' 'ciadpi|byedpi' 'byedpi|ciadpi' '-' \
+      'остановить ciadpi/ByeDPI и убрать SOCKS-прокси из настроек сети'
+}
+
+detect_dpi_bypass() {
+  # Ищет DPI-обходы (zapret и аналоги) по совокупности признаков и PF-перенаправления.
+  #   $1 — launchd: строки `launchctl list` ("PID<TAB>status<TAB>label") и пути plist
+  #   $2 — имена процессов, по одному на строку
+  #   $3 — найденные на диске пути установки, по одному на строку
+  #   $4 — записи parse_pf_redirect_rules ("anchor|kind|target")
+  # Активным считается инструмент с живым процессом, PID в launchd или своим PF-анкером;
+  # установленный, но неактивный — только заметка.
+  local launchd_text="$1" procs="$2" paths="$3" redirects="$4"
+  local id title re_launchd re_proc re_path re_anchor stop
+  local ev active redir_rec redir_text any_present=no any_active=no attributed_anchors="" rec r_anchor r_kind r_target
+  local unattributed=()
+
+  while IFS=$'\t' read -r id title re_launchd re_proc re_path re_anchor stop; do
+    [ -z "$id" ] && continue
+    ev=""
+    active=no
+    redir_rec=""
+    if [ "$re_launchd" != "-" ] && printf '%s\n' "$launchd_text" | grep -Eiq "$re_launchd"; then
+      ev="${ev:+$ev,}launchd"
+      if printf '%s\n' "$launchd_text" | awk -F'\t' '$1 ~ /^[0-9]+$/' | grep -Eiq "$re_launchd"; then
+        active=yes
+      fi
+    fi
+    if [ "$re_proc" != "-" ] && printf '%s\n' "$procs" | grep -Eixq "($re_proc)"; then
+      ev="${ev:+$ev,}process"
+      active=yes
+    fi
+    if [ "$re_path" != "-" ] && printf '%s\n' "$paths" | grep -Eiq "$re_path"; then
+      ev="${ev:+$ev,}path"
+    fi
+    if [ "$re_anchor" != "-" ] && [ -n "$redirects" ]; then
+      redir_rec="$(printf '%s\n' "$redirects" | awk -F'|' -v re="$re_anchor" '$1 ~ re {print; exit}')"
+      if [ -n "$redir_rec" ]; then
+        ev="${ev:+$ev,}pf_anchor"
+        active=yes
+        attributed_anchors="${attributed_anchors}${redir_rec%%|*}"$'\n'
+      fi
+    fi
+    [ -z "$ev" ] && continue
+
+    any_present=yes
+    redir_text=""
+    if [ -n "$redir_rec" ]; then
+      IFS='|' read -r r_anchor r_kind r_target <<< "$redir_rec"
+      redir_text=", PF: $r_kind $r_target в анкере $r_anchor"
+    fi
+    emit_fact interceptor dpi_bypass_tool "id=$id;title=$title;active=$active;evidence=$ev;redirect=${redir_rec:--};stop=$stop" "dpi signatures"
+    if [ "$active" = "yes" ]; then
+      any_active=yes
+      add_cause "Активен DPI-обход $title (признаки: $ev$redir_text): перехватывает исходящий трафик и может отправлять его мимо VPN-туннеля. Остановить: $stop"
+    else
+      add_note "Установлен DPI-обход $title (признаки: $ev), сейчас не активен. Если проблемы появляются после его запуска — остановить: $stop"
+    fi
+  done < <(dpi_bypass_signatures)
+
+  emit_fact interceptor dpi_bypass_present "$any_present" "dpi signatures"
+  emit_fact interceptor dpi_bypass_active "$any_active" "dpi signatures"
+
+  while IFS= read -r rec; do
+    [ -z "$rec" ] && continue
+    emit_fact policy pf_traffic_redirect_rule "$rec" "pfctl -a <anchor>"
+    if ! printf '%s' "$attributed_anchors" | grep -Fxq "${rec%%|*}"; then
+      IFS='|' read -r r_anchor r_kind r_target <<< "$rec"
+      unattributed+=("$r_kind $r_target в анкере $r_anchor")
+    fi
+  done <<< "$redirects"
+  if [ -n "$redirects" ]; then
+    emit_fact policy pf_traffic_redirect yes "pfctl -a <anchor>"
+  else
+    emit_fact policy pf_traffic_redirect no "pfctl -a <anchor>"
+  fi
+  if [ "${#unattributed[@]}" -gt 0 ]; then
+    emit_fact policy pf_traffic_redirect_unattributed yes "pfctl -a <anchor>"
+    add_cause "PF перенаправляет исходящий трафик ($(join_by_semicolon "${unattributed[@]}")): пакеты могут уходить мимо VPN/таблицы маршрутизации"
+  else
+    emit_fact policy pf_traffic_redirect_unattributed no "pfctl -a <anchor>"
+  fi
+}
+
+system_resolver_ips() {
+  # IP из последней system_probe (через запятую), пусто если ответа нет.
+  awk -F'\t' '$2=="resolver"&&$3=="system_probe"{v=$4} END{
+    n = split(v, p, "ips=")
+    if (n > 1) { ips = p[2]; sub(/;.*/, "", ips); if (ips != "-") print ips }
+  }' "$FACTS_FILE"
+}
+
+system_resolver_ips_all_private() {
+  # 0, если системный резолвер вернул хотя бы один IP и все они приватные.
+  local ips ip
+  ips="$(system_resolver_ips)"
+  [ -z "$ips" ] && return 1
+  for ip in ${ips//,/ }; do
+    ip_is_private "$ip" || return 1
+  done
+  return 0
+}
+
+classify_external_probe_for_internal_domain() {
+  # Внутренний домен (за VPN) снаружи не существует: NXDOMAIN от 1.1.1.1/8.8.8.8
+  # для него ожидаем и не должен превращаться в гипотезу "домен фильтруется снаружи".
+  if has_fact external probe_skipped no && has_fact external any_ok no && has_fact external all_timeout no \
+    && has_fact resolver system_resolver_ok yes && system_resolver_ips_all_private; then
+    emit_fact external internal_domain_expected yes "system resolver private-only + external fail"
+    add_note "Независимые внешние резолверы не знают $TEST_DOMAIN, а системный резолвер отдаёт только приватные адреса ($(system_resolver_ips)) — это внутренний домен, отказ снаружи ожидаем"
+  else
+    emit_fact external internal_domain_expected no "system resolver private-only + external fail"
+  fi
+}
+
+capture_dns_traffic() {
+  # Короткий capture DNS/mDNS/LLMNR в отчёт. tcpdump пишет сначала во временный
+  # файл: sudo не пересылает SIGTERM от run_with_timeout процессу из той же
+  # группы, и без этого tcpdump продолжал дописывать пакеты прямо в $OUT —
+  # в чужие секции отчёта. Поэтому запоминаем PID tcpdump и добиваем его явно.
+  local secs="${1:-5}" tmp pid body
+  tmp="/tmp/dns_diag_tcpdump_${TS_TAG}_$$.txt"
+  : > "$tmp"
+  # shellcheck disable=SC2016
+  run_with_timeout "$secs" run_sudo sh -c 'echo "$$"; exec "$@"' sh \
+    tcpdump -l -i any -n '(udp or tcp) and (port 53 or port 5353 or port 5355)' -c 30 > "$tmp" 2>/dev/null || true
+  pid="$(head -1 "$tmp")"
+  case "$pid" in
+    ''|*[!0-9]*) ;;
+    *) run_sudo kill "$pid" 2>/dev/null || true ;;
+  esac
+  body="$(tail -n +2 "$tmp")"
+  rm -f "$tmp"
+  if [ -n "$body" ]; then
+    printf '%s\n' "$body" >> "$OUT"
+  else
+    echo "tcpdump: нет DNS/mDNS/LLMNR трафика (или лимит времени ${secs}с)" >> "$OUT"
+  fi
+}
+
 HYPOTHESES=()
 add_hypothesis() {
   # Поля: score|layer|symptom|evidence|impact|next_check
@@ -1046,8 +1253,9 @@ confidence_label() {
 }
 
 build_hypotheses() {
-  local score_resolver=0 score_route=0 score_interceptor=0 score_policy=0 score_external=0
-  local ev_resolver=() ev_route=() ev_interceptor=() ev_policy=() ev_external=()
+  local score_resolver=0 score_route=0 score_interceptor=0 score_policy=0 score_external=0 score_dpi=0
+  local ev_resolver=() ev_route=() ev_interceptor=() ev_policy=() ev_external=() ev_dpi=()
+  local dpi_titles dpi_redirects dpi_stop
   local cross_mismatch_count cross_private_suspect_count
   cross_mismatch_count="$(awk -F'\t' '$2=="resolver"&&$3=="cross_mismatch_count"{v=$4} END{if(v=="") v=0; print v}' "$FACTS_FILE")"
   cross_private_suspect_count="$(awk -F'\t' '$2=="resolver"&&$3=="cross_private_ip_suspect_count"{v=$4} END{if(v=="") v=0; print v}' "$FACTS_FILE")"
@@ -1140,7 +1348,8 @@ build_hypotheses() {
     ev_interceptor+=("рассинхронизация ответов вне VPN — вероятно локальная сеть/провайдер, не VPN")
   fi
   if has_fact external probe_skipped no; then
-    if has_fact external any_ok no && has_fact external all_timeout no; then
+    if has_fact external any_ok no && has_fact external all_timeout no \
+      && ! has_fact external internal_domain_expected yes; then
       score_external=$((score_external + 50))
       ev_external+=("независимые внешние резолверы (не из конфигурации системы) тоже не резолвят домен")
     fi
@@ -1153,6 +1362,29 @@ build_hypotheses() {
       ev_interceptor+=("независимые резолверы отвечают нормально, а системный резолвер — нет: проблема локальная")
     fi
   fi
+
+  # DPI-обход (zapret и аналоги): трафик перехватывается и уходит мимо маршрутизации/VPN.
+  if has_fact interceptor dpi_bypass_active yes; then
+    dpi_titles="$(awk -F'\t' '$2=="interceptor"&&$3=="dpi_bypass_tool"&&$4 ~ /;active=yes;/ {
+      t=$4; sub(/.*;title=/, "", t); sub(/;.*/, "", t); printf "%s%s", (n++ ? ", " : ""), t }' "$FACTS_FILE")"
+    score_dpi=$((score_dpi + 50))
+    ev_dpi+=("активен DPI-обход: ${dpi_titles:-неизвестный}")
+  fi
+  if has_fact policy pf_traffic_redirect yes; then
+    dpi_redirects="$(awk -F'\t' '$2=="policy"&&$3=="pf_traffic_redirect_rule" {
+      split($4, p, "|"); printf "%s%s %s в анкере %s", (n++ ? ", " : ""), p[2], p[3], p[1] }' "$FACTS_FILE")"
+    score_dpi=$((score_dpi + 25))
+    ev_dpi+=("PF перенаправляет исходящий трафик: $dpi_redirects")
+  fi
+  if [ "$score_dpi" -gt 0 ] && has_fact e2e resolve_phase ok && has_fact e2e connect_phase fail; then
+    score_dpi=$((score_dpi + 20))
+    ev_dpi+=("DNS резолвит домен, но TCP-соединение не устанавливается")
+    if system_resolver_ips_all_private; then
+      score_dpi=$((score_dpi + 10))
+      ev_dpi+=("целевой адрес приватный ($(system_resolver_ips)) — ресурс за VPN, а перехваченный трафик уходит через шлюз физического интерфейса")
+    fi
+  fi
+  [ "$score_dpi" -gt 100 ] && score_dpi=100
 
   if [ "$score_resolver" -gt 0 ]; then
     add_hypothesis "$score_resolver" "resolver" \
@@ -1181,6 +1413,15 @@ build_hypotheses() {
       "$(join_by_semicolon "${ev_policy[@]}")" \
       "DNS запросы могут блокироваться правилами ОС" \
       "sudo pfctl -sr; sudo log show --predicate 'subsystem == \"com.apple.pf\"' --last 1h"
+  fi
+  if [ "$score_dpi" -gt 0 ]; then
+    dpi_stop="$(awk -F'\t' '$2=="interceptor"&&$3=="dpi_bypass_tool"&&$4 ~ /;active=yes;/ {
+      t=$4; sub(/.*;stop=/, "", t); printf "%s%s", (n++ ? "; " : ""), t }' "$FACTS_FILE")"
+    add_hypothesis "$score_dpi" "dpi_bypass" \
+      "DPI-обход (zapret и аналоги) перехватывает трафик и отправляет его мимо VPN/таблицы маршрутизации" \
+      "$(join_by_semicolon "${ev_dpi[@]}")" \
+      "TCP 80/443 к ресурсам за VPN (и часть внешних) зависает до таймаута, хотя DNS в порядке" \
+      "${dpi_stop:-sudo pfctl -a '<анкер>' -sr и остановить ПО, загрузившее анкер}; затем повторить тест"
   fi
   if [ "$score_external" -gt 0 ]; then
     add_hypothesis "$score_external" "external" \
@@ -1372,12 +1613,22 @@ emit_fact resolver nameserver_count "$SCUTIL_NS_COUNT" "scutil --dns"
 
 say_step "2/12 PF: статус/анкоры/правила"
 say_step_detail "Читаем pfctl: info / anchors / rules"
+say_step_detail "Обходим все анкеры (включая com.apple/*): ищем route-to/rdr/divert"
 say_step_detail "Фиксируем факт: PF включен или нет"
 # 2. PF полный
 echo -e "\n>> PF: статус, анкоры, правила" >> "$OUT"
 run_sudo pfctl -s info >> "$OUT" 2>&1
-run_sudo pfctl -a all -s info >> "$OUT" 2>&1
 run_sudo pfctl -s rules >> "$OUT" 2>&1
+PF_ANCHOR_RAW="$(collect_pf_anchor_rules)"
+PF_REDIRECTS="$(printf '%s\n' "$PF_ANCHOR_RAW" | parse_pf_redirect_rules)"
+echo -e "\n>> PF_ANCHOR_RULES (nat/rdr + filter по каждому анкеру)" >> "$OUT"
+printf '%s\n' "$PF_ANCHOR_RAW" >> "$OUT"
+echo -e "\n>> PF_TRAFFIC_REDIRECTS (anchor|kind|target)" >> "$OUT"
+if [ -n "$PF_REDIRECTS" ]; then
+  printf '%s\n' "$PF_REDIRECTS" >> "$OUT"
+else
+  echo "none" >> "$OUT"
+fi
 if run_sudo pfctl -s info 2>/dev/null | grep -q "Status: Enabled"; then
   emit_fact policy pf_enabled yes "pfctl -s info"
 else
@@ -1398,26 +1649,37 @@ echo -e "\n>> systemextensionsctl список" >> "$OUT"
 systemextensionsctl list >> "$OUT" 2>&1
 
 say_step "4/12 Процессы VPN/Прокси/PF"
-say_step_detail "Ищем процессы VPN/Proxy/Filter через pgrep"
+say_step_detail "Ищем процессы VPN/Proxy/Filter/DPI-обхода через pgrep"
 # 4. ВСЕ процессы VPN/Прокси/PF (расширенный список)
-VPN_PROCS="happ|ngate|cryptopro|xray|v2ray|v2rayn|qv2ray|nekoray|sing-box|clash|clashx|clashx-pro|clash-verge|shadowrocket|shadowsocksx|shadowsocksx-ng|shadowsocks|quantumult|surge|loon|stash|kitsunebi|v2box|napsternet|mosdns|dnscrypt-proxy|cloudflared|adguard|nextdns|smartdns|stubby|unbound|coredns|1\\.1\\.1\\.1|outline|wireguard|tailscale|headscale|mullvad|protonvpn|expressvpn|nordvpn|surfshark|pia|privateinternetaccess|ivpn|windscribe|purevpn|vyprvpn|cyberghost|hide\\.me|zenmate|tunnelbear|astrill|hotspotshield|hma|openvpn|viscosity|tunnelblick|shimo|vpntracker|forticlient|paloaltonetworks|globalprotect|pulse|anyconnect|cisco|checkpoint|snx|sophos|sonicwall|zerotier|netbird|privoxy|polipo|3proxy|dante|tinyproxy|squid|mitmproxy|proxifier|proxychains|proxyswitcher|proxynotion|littlesnitch|lulu|tripmode|murus|goodbyedpi|zapret|antizapret|stunnel|obfs4proxy|meek-client|snowflake|tor|psiphon|safing|portmaster|proxynotion|ovpnproxy|unblockpro"
+VPN_PROCS="happ|ngate|cryptopro|xray|v2ray|v2rayn|qv2ray|nekoray|sing-box|clash|clashx|clashx-pro|clash-verge|shadowrocket|shadowsocksx|shadowsocksx-ng|shadowsocks|quantumult|surge|loon|stash|kitsunebi|v2box|napsternet|mosdns|dnscrypt-proxy|cloudflared|adguard|nextdns|smartdns|stubby|unbound|coredns|1\\.1\\.1\\.1|outline|wireguard|tailscale|headscale|mullvad|protonvpn|expressvpn|nordvpn|surfshark|pia|privateinternetaccess|ivpn|windscribe|purevpn|vyprvpn|cyberghost|hide\\.me|zenmate|tunnelbear|astrill|hotspotshield|hma|openvpn|viscosity|tunnelblick|shimo|vpntracker|forticlient|paloaltonetworks|globalprotect|pulse|anyconnect|cisco|checkpoint|snx|sophos|sonicwall|zerotier|netbird|privoxy|polipo|3proxy|dante|tinyproxy|squid|mitmproxy|proxifier|proxychains|proxyswitcher|proxynotion|littlesnitch|lulu|tripmode|murus|goodbyedpi|zapret|antizapret|utunws|tpws|dvtws|nfqws|spoofdpi|byedpi|ciadpi|stunnel|obfs4proxy|meek-client|snowflake|tor|psiphon|safing|portmaster|proxynotion|ovpnproxy|unblockpro"
 echo -e "\n>> ПРОЦЕССЫ VPN/Прокси/PF" >> "$OUT"
-pgrep -ai "$VPN_PROCS|neagent|utun|pfctl|socketfilterfw" >> "$OUT" 2>&1 || true
+# На macOS `pgrep -a` значит "включать предков" и печатает только PID; имя даёт -l.
+pgrep -il "$VPN_PROCS|neagent|utun|pfctl|socketfilterfw" >> "$OUT" 2>&1 || true
+PROC_NAMES="$(ps -axo comm= 2>/dev/null | awk -F/ '{print $NF}' | sort -u)"
 
 say_step "5/12 Службы запуска"
-say_step_detail "Проверяем launchctl и plist сервисы VPN/Proxy"
+say_step_detail "Проверяем launchctl (user + system) и plist сервисы VPN/Proxy/DPI-обхода"
 # 5. Launch plist всех клиентов
-LAUNCH_LIST="happ|ngate|cryptopro|xray|v2ray|qv2ray|clash|clashx|shadow|quantumult|surge|loon|stash|sing|nekoray|kitsunebi|v2box|napster|mosdns|dnscrypt|cloudflared|adguard|nextdns|smartdns|stubby|unbound|coredns|outline|wireguard|tailscale|headscale|mullvad|proton|expressvpn|nord|surfshark|pia|privateinternetaccess|ivpn|windscribe|purevpn|vypr|cyberghost|tunnelbear|astrill|hotspotshield|hma|openvpn|viscosity|tunnelblick|shimo|vpntracker|forticlient|paloalto|globalprotect|pulse|anyconnect|cisco|checkpoint|snx|sophos|sonicwall|zerotier|netbird|privoxy|polipo|3proxy|dante|tinyproxy|squid|mitmproxy|proxifier|proxychains|proxyswitcher|socketfilterfw|littlesnitch|lulu|tripmode|murus|icefloor|goodbyedpi|zapret|antizapret|stunnel|obfs4|meek|snowflake|tor|psiphon|safing|portmaster|unblockpro"
+LAUNCH_LIST="happ|ngate|cryptopro|xray|v2ray|qv2ray|clash|clashx|shadow|quantumult|surge|loon|stash|sing|nekoray|kitsunebi|v2box|napster|mosdns|dnscrypt|cloudflared|adguard|nextdns|smartdns|stubby|unbound|coredns|outline|wireguard|tailscale|headscale|mullvad|proton|expressvpn|nord|surfshark|pia|privateinternetaccess|ivpn|windscribe|purevpn|vypr|cyberghost|tunnelbear|astrill|hotspotshield|hma|openvpn|viscosity|tunnelblick|shimo|vpntracker|forticlient|paloalto|globalprotect|pulse|anyconnect|cisco|checkpoint|snx|sophos|sonicwall|zerotier|netbird|privoxy|polipo|3proxy|dante|tinyproxy|squid|mitmproxy|proxifier|proxychains|proxyswitcher|socketfilterfw|littlesnitch|lulu|tripmode|murus|icefloor|goodbyedpi|zapret|antizapret|utunws|tpws|dvtws|nfqws|spoofdpi|byedpi|ciadpi|stunnel|obfs4|meek|snowflake|tor|psiphon|safing|portmaster|unblockpro"
 echo -e "\n>> Службы запуска (launchd) VPN/Прокси" >> "$OUT"
-launchctl list 2>/dev/null | grep -iE "$LAUNCH_LIST" >> "$OUT"
-find /Library/Launch* ~/Library/Launch* -name "*.plist" -print0 2>/dev/null | xargs -0 grep -l -iE "$LAUNCH_LIST" 2>/dev/null | head -20 >> "$OUT"
+# Без sudo `launchctl list` видит только user-домен: системные демоны
+# (/Library/LaunchDaemons, например io.github.flowseal.zapretmac) там не появляются.
+LAUNCHD_USER="$(launchctl list 2>/dev/null | grep -iE "$LAUNCH_LIST")"
+LAUNCHD_SYSTEM="$(run_sudo launchctl list 2>/dev/null | grep -iE "$LAUNCH_LIST")"
+LAUNCHD_PLISTS="$(find /Library/Launch* ~/Library/Launch* -name "*.plist" -print0 2>/dev/null | xargs -0 grep -l -iE "$LAUNCH_LIST" 2>/dev/null | head -20)"
+printf '%s\n' "$LAUNCHD_USER" >> "$OUT"
+echo -e "\n>> Службы запуска (launchd, system-домен)" >> "$OUT"
+printf '%s\n' "$LAUNCHD_SYSTEM" >> "$OUT"
+echo -e "\n>> plist служб запуска" >> "$OUT"
+printf '%s\n' "$LAUNCHD_PLISTS" >> "$OUT"
+LAUNCHD_RAW="$(printf '%s\n%s\n%s\n' "$LAUNCHD_USER" "$LAUNCHD_SYSTEM" "$LAUNCHD_PLISTS")"
 
 say_step "6/12 DNS трафик и PF блоки"
 say_step_detail "Короткий capture DNS/mDNS/LLMNR: tcpdump"
 say_step_detail "Ищем PF block события за 1 час"
 # 6. DNS трафик + блоки
 echo -e "\n>> DNS трафик (30 пакетов)" >> "$OUT"
-run_with_timeout 5 run_sudo tcpdump -i any -n '(udp or tcp) and (port 53 or port 5353 or port 5355)' -c 30 2>/dev/null >> "$OUT" || echo "tcpdump: нет DNS/mDNS/LLMNR трафика (или лимит времени 5с)" >> "$OUT"
+capture_dns_traffic 5
 echo -e "\n>> PF блоки (1ч)" >> "$OUT"
 PF_BLOCKS="$(run_sudo log show --style compact --predicate 'subsystem == "com.apple.pf"' --last 1h --info 2>/dev/null | grep -i block | head -15 || true)"
 if [ -n "$PF_BLOCKS" ]; then
@@ -1430,10 +1692,26 @@ fi
 
 say_step "7/12 Конфиги приложений"
 say_step_detail "Сканируем типовые пути конфигов VPN/Proxy приложений"
+say_step_detail "Ищем DPI-обходы (ZapretMac, zapret, SpoofDPI, ByeDPI)"
 # 7. Конфиги приложений (папки)
-APPS_PATHS="happ|ngate|cryptopro|xray|v2ray|qv2ray|clash|clashx|shadowrocket|shadowsocks|quantumult|surge|loon|stash|adguard|nextdns|wireguard|tailscale|headscale|mullvad|proton|expressvpn|nordvpn|surfshark|pia|privateinternetaccess|ivpn|windscribe|purevpn|vypr|cyberghost|tunnelbear|astrill|openvpn|viscosity|tunnelblick|shimo|vpntracker|globalprotect|forticlient|anyconnect|cisco|zerotier|netbird|littlesnitch|lulu|tripmode|murus|goodbyedpi|zapret|antizapret|unblockpro"
+APPS_PATHS="happ|ngate|cryptopro|xray|v2ray|qv2ray|clash|clashx|shadowrocket|shadowsocks|quantumult|surge|loon|stash|adguard|nextdns|wireguard|tailscale|headscale|mullvad|proton|expressvpn|nordvpn|surfshark|pia|privateinternetaccess|ivpn|windscribe|purevpn|vypr|cyberghost|tunnelbear|astrill|openvpn|viscosity|tunnelblick|shimo|vpntracker|globalprotect|forticlient|anyconnect|cisco|zerotier|netbird|littlesnitch|lulu|tripmode|murus|goodbyedpi|zapret|antizapret|spoofdpi|byedpi|ciadpi|unblockpro"
 echo -e "\n>> Конфиги приложений" >> "$OUT"
-find ~/Library/Preferences ~/Library/Application\ Support ~/Library/Caches /Applications -maxdepth 3 2>/dev/null | grep -Ei "$APPS_PATHS" | head -20 >> "$OUT"
+APP_CONFIG_PATHS="$(find ~/Library/Preferences ~/Library/Application\ Support ~/Library/Caches /Applications -maxdepth 3 2>/dev/null | grep -Ei "$APPS_PATHS" | head -20)"
+printf '%s\n' "$APP_CONFIG_PATHS" >> "$OUT"
+
+# DPI-обходы (zapret и аналоги): сопоставляем launchd, процессы, пути и PF-анкеры.
+DPI_INSTALL_PATHS="$(
+  for p in "/Library/Application Support/ZapretMac" "$HOME/Library/Application Support/ZapretMac" \
+    /opt/zapret /usr/local/bin/spoofdpi /opt/homebrew/bin/spoofdpi /usr/local/bin/ciadpi /opt/homebrew/bin/ciadpi; do
+    [ -e "$p" ] && printf '%s\n' "$p"
+  done
+  printf '%s\n' "$APP_CONFIG_PATHS"
+)"
+detect_dpi_bypass "$LAUNCHD_RAW" "$PROC_NAMES" "$DPI_INSTALL_PATHS" "$PF_REDIRECTS"
+echo -e "\n>> DPI_BYPASS" >> "$OUT"
+echo "present=$(has_fact interceptor dpi_bypass_present yes && echo yes || echo no)" >> "$OUT"
+echo "active=$(has_fact interceptor dpi_bypass_active yes && echo yes || echo no)" >> "$OUT"
+awk -F'\t' '$2=="interceptor"&&$3=="dpi_bypass_tool"{print "tool: " $4}' "$FACTS_FILE" >> "$OUT"
 
 say_step "8/12 Локальные слушатели портов"
 say_step_detail "Проверяем, кто держит /dev/pf"
@@ -1812,6 +2090,7 @@ fi
 run_scoped_resolver_probes "$SCUTIL_DNS_RAW" "$TEST_DOMAIN_QUERY"
 classify_dns_server_failures
 run_external_dns_probes "$TEST_DOMAIN_QUERY"
+classify_external_probe_for_internal_domain
 run_cross_resolver_consistency_check
 run_e2e_curl_probe "$TEST_DOMAIN" "$TEST_DOMAIN_QUERY"
 render_dual_mode_sections

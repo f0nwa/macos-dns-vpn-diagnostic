@@ -94,3 +94,52 @@ write_facts() {
   [ "$(awk -F'\t' '$3=="cross_consensus_ip"{v=$4} END{print v}' "$FACTS_FILE")" = "-" ]
   [ "$(awk -F'\t' '$3=="cross_mismatch_count"{v=$4} END{print v}' "$FACTS_FILE")" = "0" ]
 }
+
+@test "внутренний домен: внешние NXDOMAIN, системный резолвер даёт только приватные IP -> ожидаемо, заметка" {
+  source_fns system_resolver_ips system_resolver_ips_all_private classify_external_probe_for_internal_domain
+  add_note() { NOTES+=("$1"); }
+  NOTES=()
+  TEST_DOMAIN="help.corp.example"
+  write_facts \
+    $'1\tresolver\tsystem_resolver_ok\tyes\ttest' \
+    $'1\tresolver\tsystem_probe\trr=A;result=ok;reason=NOERROR;answers=2;ips=10.200.60.201,10.200.60.202\ttest' \
+    $'1\texternal\tprobe_skipped\tno\ttest' \
+    $'1\texternal\tany_ok\tno\ttest' \
+    $'1\texternal\tall_timeout\tno\ttest'
+  classify_external_probe_for_internal_domain
+  has_fact external internal_domain_expected yes
+  [ "${#NOTES[@]}" -eq 1 ]
+  [[ "${NOTES[0]}" == *"10.200.60.201"* ]]
+}
+
+@test "публичный IP у системного резолвера + внешние NXDOMAIN -> не помечается как внутренний домен" {
+  source_fns system_resolver_ips system_resolver_ips_all_private classify_external_probe_for_internal_domain
+  add_note() { NOTES+=("$1"); }
+  NOTES=()
+  TEST_DOMAIN="example.com"
+  write_facts \
+    $'1\tresolver\tsystem_resolver_ok\tyes\ttest' \
+    $'1\tresolver\tsystem_probe\trr=A;result=ok;reason=NOERROR;answers=2;ips=10.0.0.5,93.184.216.34\ttest' \
+    $'1\texternal\tprobe_skipped\tno\ttest' \
+    $'1\texternal\tany_ok\tno\ttest' \
+    $'1\texternal\tall_timeout\tno\ttest'
+  classify_external_probe_for_internal_domain
+  has_fact external internal_domain_expected no
+  [ "${#NOTES[@]}" -eq 0 ]
+}
+
+@test "внешние пробы ушли в таймаут -> внутренним доменом не считаем (нет данных)" {
+  source_fns system_resolver_ips system_resolver_ips_all_private classify_external_probe_for_internal_domain
+  add_note() { NOTES+=("$1"); }
+  NOTES=()
+  TEST_DOMAIN="help.corp.example"
+  write_facts \
+    $'1\tresolver\tsystem_resolver_ok\tyes\ttest' \
+    $'1\tresolver\tsystem_probe\trr=A;result=ok;reason=NOERROR;answers=1;ips=10.200.60.201\ttest' \
+    $'1\texternal\tprobe_skipped\tno\ttest' \
+    $'1\texternal\tany_ok\tno\ttest' \
+    $'1\texternal\tall_timeout\tyes\ttest'
+  classify_external_probe_for_internal_domain
+  has_fact external internal_domain_expected no
+  [ "${#NOTES[@]}" -eq 0 ]
+}

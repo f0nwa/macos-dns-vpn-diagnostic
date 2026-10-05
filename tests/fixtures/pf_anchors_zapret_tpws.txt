@@ -1,0 +1,10 @@
+anchor=
+scrub-anchor "com.apple/*" all fragment reassemble
+nat-anchor "com.apple/*" all
+rdr-anchor "com.apple/*" all
+rdr-anchor "zapret" all
+anchor "com.apple/*" all
+anchor "zapret" all
+anchor=zapret
+rdr pass on lo0 inet proto tcp from !127.0.0.0/8 to any port = 443 -> 127.0.0.1 port 988
+pass out route-to (lo0 127.0.0.1) inet proto tcp from any to any port = 443 user != 501 flags S/SA keep state
