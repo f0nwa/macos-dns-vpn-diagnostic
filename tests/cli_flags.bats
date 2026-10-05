@@ -5,6 +5,10 @@
 
 load 'lib/extract'
 
+# Полный скрипт гоняем тем же bash, что у пользователей macOS (/bin/bash 3.2),
+# даже если сам bats запущен под более новым bash из Homebrew.
+SCRIPT_BASH="${SCRIPT_BASH:-/bin/bash}"
+
 setup() {
   OUT_FILE="$(mktemp -u)/ci_report.txt"
   mkdir -p "$(dirname "$OUT_FILE")"
@@ -15,24 +19,24 @@ teardown() {
 }
 
 @test "--help prints usage and exits 0" {
-  run bash "$SCRIPT_UNDER_TEST" --help
+  run "$SCRIPT_BASH" "$SCRIPT_UNDER_TEST" --help
   [ "$status" -eq 0 ]
   [[ "$output" == *"Usage: macos-dns-test.sh"* ]]
 }
 
 @test "unknown flag is rejected with exit code 2" {
-  run bash "$SCRIPT_UNDER_TEST" --nonsense </dev/null
+  run "$SCRIPT_BASH" "$SCRIPT_UNDER_TEST" --nonsense </dev/null
   [ "$status" -eq 2 ]
 }
 
 @test "--domain with invalid format is rejected with exit code 2, no hang" {
-  run timeout 10 bash "$SCRIPT_UNDER_TEST" --domain=notadomain --yes </dev/null
+  run timeout 10 "$SCRIPT_BASH" "$SCRIPT_UNDER_TEST" --domain=notadomain --yes </dev/null
   [ "$status" -eq 2 ]
   [[ "$output" == *"Некорректный --domain"* ]]
 }
 
 @test "full non-interactive run completes and produces a well-formed report" {
-  run timeout 90 bash "$SCRIPT_UNDER_TEST" --domain=example.com --yes --output="$OUT_FILE" < /dev/null
+  run timeout 90 "$SCRIPT_BASH" "$SCRIPT_UNDER_TEST" --domain=example.com --yes --output="$OUT_FILE" < /dev/null
   [ "$status" -eq 0 ]
   [ -f "$OUT_FILE" ]
   grep -q '>> DNS_ONLY_RESULT' "$OUT_FILE"
@@ -46,13 +50,13 @@ teardown() {
 }
 
 @test "--output writes to the exact path given, not \$(pwd)" {
-  run timeout 90 bash "$SCRIPT_UNDER_TEST" --domain=example.com --yes --output="$OUT_FILE" < /dev/null
+  run timeout 90 "$SCRIPT_BASH" "$SCRIPT_UNDER_TEST" --domain=example.com --yes --output="$OUT_FILE" < /dev/null
   [ "$status" -eq 0 ]
   [ -f "$OUT_FILE" ]
 }
 
 @test "--no-external-dns skips independent DNS probes and marks it in the report" {
-  run timeout 90 bash "$SCRIPT_UNDER_TEST" --domain=example.com --yes --no-external-dns --output="$OUT_FILE" < /dev/null
+  run timeout 90 "$SCRIPT_BASH" "$SCRIPT_UNDER_TEST" --domain=example.com --yes --no-external-dns --output="$OUT_FILE" < /dev/null
   [ "$status" -eq 0 ]
   [ -f "$OUT_FILE" ]
   grep -q '>> EXTERNAL_DNS_PROBE' "$OUT_FILE"

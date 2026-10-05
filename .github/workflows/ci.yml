@@ -10,10 +10,7 @@ on:
 jobs:
   lint-and-test:
     runs-on: macos-latest
-    # UTF-8 локаль обязательна: имена тестов на кириллице. В локали раннера по
-    # умолчанию (C/POSIX) байты 0x80–0x9F из UTF-8 (буквы р, с, т, у, х, ы и т.п.)
-    # считаются непечатаемыми, bats кодирует имя теста иначе, чем потом ищет его,
-    # и падает с "bats: unknown test name" — такие тесты просто не запускаются.
+    # Имена тестов на кириллице: нужна UTF-8 локаль (см. также шаг установки bash).
     env:
       LANG: en_US.UTF-8
       LC_ALL: en_US.UTF-8
@@ -25,8 +22,13 @@ jobs:
         # его нет, а tests/cli_flags.bats на нём завязан (защита от зависания
         # при полном прогоне скрипта). gnubin кладём в PATH, чтобы `timeout`
         # резолвился в GNU-версию без переписывания тестов на `gtimeout`.
+        # bash из Homebrew нужен самому bats: под системным /bin/bash 3.2 bats
+        # неверно кодирует кириллические имена тестов (многобайтовые символы
+        # разбираются побайтно) и падает с "bats: unknown test name" — такие
+        # тесты не запускаются. Сам скрипт по-прежнему проверяется под /bin/bash
+        # 3.2 (как у пользователей): см. SCRIPT_BASH в tests/cli_flags.bats.
         run: |
-          brew install shellcheck bats-core coreutils
+          brew install shellcheck bats-core coreutils bash
           echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
 
       - name: ShellCheck
