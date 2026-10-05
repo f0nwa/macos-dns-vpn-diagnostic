@@ -231,6 +231,10 @@ add_cause() { CAUSES+=("$1"); }
 # проблемой (например, ожидаемый NXDOMAIN от локального DNS при split-DNS через VPN).
 NOTES=()
 add_note() { NOTES+=("$1"); }
+# Ограничения проверки: шаги, которые не удалось выполнить полностью (например,
+# macOS не дала доступ к папкам). Наличие хотя бы одной записи = отчёт неполный.
+COVERAGE_GAPS=()
+add_coverage_gap() { COVERAGE_GAPS+=("$1"); }
 # Отказы отдельных DNS-серверов ("server|reason"). Решение, проблема это или
 # ожидаемое поведение split-DNS, принимает classify_dns_server_failures().
 DNS_SERVER_FAILS=()
@@ -1099,6 +1103,68 @@ dpi_bypass_signatures() {
       'остановить ciadpi/ByeDPI и убрать SOCKS-прокси из настроек сети'
 }
 
+# Папки внутри ~/Library, в которые шаг 7 не заходит: системные данные Apple
+# (com.apple.*) и каталоги под защитой TCC. Конфигов VPN/прокси там нет, а обход
+# их содержимого вызывает системные запросы macOS (Apple Music/медиатека,
+# Контакты, Календари и т.п.). Сами имена этих папок по-прежнему попадают в вывод.
+APP_SCAN_PRUNE_NAMES=('com.apple.*' AddressBook Calendars CallHistoryDB CallHistoryTransactions CloudDocs FaceTime Knowledge Mail Messages MobileSync Safari)
+
+# Ищет пути конфигов VPN/прокси приложений (до 20 совпадений с regex $1) в корнях
+# $2... Результат — в глобальных переменных (не через stdout, чтобы не терять их
+# в subshell):
+#   APP_CONFIG_PATHS  — найденные пути (по одному на строку);
+#   APP_SCAN_DENIED   — массив путей, куда macOS не пустила (TCC/права доступа).
+APP_CONFIG_PATHS=""
+APP_SCAN_DENIED=()
+scan_app_config_paths() {
+  local pattern="$1"; shift
+  local out_file err_file name prune_expr=()
+  out_file="$(mktemp "${TMPDIR:-/tmp}/dns_diag_appscan_out.XXXXXX")"
+  err_file="$(mktemp "${TMPDIR:-/tmp}/dns_diag_appscan_err.XXXXXX")"
+  for name in "${APP_SCAN_PRUNE_NAMES[@]}"; do
+    [ "${#prune_expr[@]}" -gt 0 ] && prune_expr+=(-o)
+    prune_expr+=(-name "$name")
+  done
+  find "$@" -maxdepth 3 \( "${prune_expr[@]}" \) -prune -print -o -print >"$out_file" 2>"$err_file" || true
+  APP_CONFIG_PATHS="$(grep -Ei "$pattern" "$out_file" | head -20 || true)"
+  APP_SCAN_DENIED=()
+  # BSD find: "find: /path: ...", GNU find: "find: '/path': ..." или ‘/path’.
+  while IFS= read -r name; do
+    [ -n "$name" ] && APP_SCAN_DENIED+=("$name")
+  done < <(sed -E -n 's/^find: (.*): (Operation not permitted|Permission denied)$/\1/p' "$err_file" \
+    | sed -E -e "s/^('|‘)//" -e "s/('|’)\$//" | sort -u)
+  rm -f "$out_file" "$err_file"
+}
+
+# Подсказка, как вернуть доступ, если пользователь ранее отказал в запросе macOS.
+# macOS запоминает отказ и повторно не спрашивает — помогает только ручное
+# включение в настройках или сброс решения через tccutil.
+tcc_recovery_hint() {
+  local app="${TERM_PROGRAM:-Terminal}" bundle="${__CFBundleIdentifier:-}"
+  [ "$app" = "Apple_Terminal" ] && app="Terminal"
+  printf '%s' "macOS запоминает отказ и сама повторно не спросит. Чтобы дать доступ: Системные настройки → Конфиденциальность и безопасность → «Медиа и Apple Music» (или «Файлы и папки» / «Полный доступ к диску») → включить ${app}; либо сбросить прошлое решение командой: tccutil reset MediaLibrary${bundle:+ $bundle} — и перезапустить скрипт, тогда запрос появится снова"
+}
+
+# Фиксирует результат обхода шага 7 в отчёте/фактах и, если macOS не пустила
+# в часть папок, помечает отчёт как неполный.
+report_app_scan_access() {
+  local shown denied_count="${#APP_SCAN_DENIED[@]}"
+  echo -e "\n>> APP_CONFIG_SCAN_ACCESS" >> "$OUT"
+  if [ "$denied_count" -eq 0 ]; then
+    echo "access=ok" >> "$OUT"
+    emit_fact coverage app_config_scan complete "find ~/Library,/Applications"
+    return 0
+  fi
+  echo "access=denied denied_count=$denied_count" >> "$OUT"
+  printf 'denied: %s\n' "${APP_SCAN_DENIED[@]:0:10}" >> "$OUT"
+  [ "$denied_count" -gt 10 ] && echo "denied: ... и ещё $((denied_count - 10))" >> "$OUT"
+  echo "hint: $(tcc_recovery_hint)" >> "$OUT"
+  emit_fact coverage app_config_scan incomplete "find ~/Library,/Applications"
+  shown="$(join_by_semicolon "${APP_SCAN_DENIED[@]:0:3}")"
+  [ "$denied_count" -gt 3 ] && shown="$shown; ... (всего $denied_count)"
+  add_coverage_gap "Шаг 7/12 (конфиги приложений): macOS не предоставила доступ к папкам — $shown. Поиск конфигов VPN/прокси выполнен не полностью. $(tcc_recovery_hint)"
+}
+
 detect_dpi_bypass() {
   # Ищет DPI-обходы (zapret и аналоги) по совокупности признаков и PF-перенаправления.
   #   $1 — launchd: строки `launchctl list` ("PID<TAB>status<TAB>label") и пути plist
@@ -1691,13 +1757,22 @@ else
 fi
 
 say_step "7/12 Конфиги приложений"
+printf "  %smacOS может спросить доступ для %s (например, к «Apple Music/медиатеке», «Контактам»).%s\n" "$YELLOW" "${TERM_PROGRAM:-Terminal}" "$RESET"
+printf "  %sЗачем: шаг ищет конфиги VPN/прокси приложений в ~/Library по именам папок; содержимое файлов и медиатеку скрипт не читает.%s\n" "$YELLOW" "$RESET"
+printf "  %sРазрешите доступ для полной проверки. При отказе шаг будет помечен в отчёте как неполный.%s\n" "$YELLOW" "$RESET"
 say_step_detail "Сканируем типовые пути конфигов VPN/Proxy приложений"
 say_step_detail "Ищем DPI-обходы (ZapretMac, zapret, SpoofDPI, ByeDPI)"
 # 7. Конфиги приложений (папки)
 APPS_PATHS="happ|ngate|cryptopro|xray|v2ray|qv2ray|clash|clashx|shadowrocket|shadowsocks|quantumult|surge|loon|stash|adguard|nextdns|wireguard|tailscale|headscale|mullvad|proton|expressvpn|nordvpn|surfshark|pia|privateinternetaccess|ivpn|windscribe|purevpn|vypr|cyberghost|tunnelbear|astrill|openvpn|viscosity|tunnelblick|shimo|vpntracker|globalprotect|forticlient|anyconnect|cisco|zerotier|netbird|littlesnitch|lulu|tripmode|murus|goodbyedpi|zapret|antizapret|spoofdpi|byedpi|ciadpi|unblockpro"
 echo -e "\n>> Конфиги приложений" >> "$OUT"
-APP_CONFIG_PATHS="$(find ~/Library/Preferences ~/Library/Application\ Support ~/Library/Caches /Applications -maxdepth 3 2>/dev/null | grep -Ei "$APPS_PATHS" | head -20)"
+scan_app_config_paths "$APPS_PATHS" ~/Library/Preferences ~/Library/Application\ Support ~/Library/Caches /Applications
 printf '%s\n' "$APP_CONFIG_PATHS" >> "$OUT"
+report_app_scan_access
+if [ "${#APP_SCAN_DENIED[@]}" -gt 0 ]; then
+  stop_step_spinner
+  printf "  %sДоступ к части папок не предоставлен (%s шт.) — поиск конфигов неполный, это отмечено в отчёте.%s\n" "$YELLOW" "${#APP_SCAN_DENIED[@]}" "$RESET"
+  printf "  %s%s%s\n" "$YELLOW" "$(tcc_recovery_hint)" "$RESET"
+fi
 
 # DPI-обходы (zapret и аналоги): сопоставляем launchd, процессы, пути и PF-анкеры.
 DPI_INSTALL_PATHS="$(
@@ -2104,6 +2179,12 @@ else
     echo "- $c" >> "$OUT"
   done
 fi
+if [ "${#COVERAGE_GAPS[@]}" -gt 0 ]; then
+  echo -e "\n>> ОТЧЁТ НЕПОЛНЫЙ: ограничения проверки" >> "$OUT"
+  for c in "${COVERAGE_GAPS[@]}"; do
+    echo "- $c" >> "$OUT"
+  done
+fi
 if [ "${#NOTES[@]}" -gt 0 ]; then
   echo -e "\n>> К сведению (не проблемы)" >> "$OUT"
   for c in "${NOTES[@]}"; do
@@ -2139,6 +2220,13 @@ if [ "${#NOTES[@]}" -gt 0 ]; then
   echo "К сведению (не проблемы):"
   for c in "${NOTES[@]}"; do
     echo -e "${CYAN}- $c${RESET}"
+  done
+fi
+if [ "${#COVERAGE_GAPS[@]}" -gt 0 ]; then
+  echo
+  echo -e "${YELLOW}ОТЧЁТ НЕПОЛНЫЙ — часть проверок не выполнена:${RESET}"
+  for c in "${COVERAGE_GAPS[@]}"; do
+    echo -e "${YELLOW}- $c${RESET}"
   done
 fi
 printf "\n${CYAN}Отчет сохранен в: ${MAGENTA}%s${RESET}\n\n" "$OUT"

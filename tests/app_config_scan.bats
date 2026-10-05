@@ -1,0 +1,87 @@
+#!/usr/bin/env bats
+# Шаг 7/12 (поиск конфигов приложений в ~/Library): обход не должен заходить в
+# системные/TCC-папки (из-за этого macOS спрашивала доступ к Apple Music/медиатеке),
+# а если macOS всё же не пустила в какие-то папки — отчёт помечается как неполный.
+
+load 'lib/extract'
+
+APPS_RE='clash|wireguard|tailscale'
+
+setup() {
+  source_fns emit_fact has_fact join_by_semicolon scan_app_config_paths tcc_recovery_hint report_app_scan_access
+  # Однострочные определения из скрипта extract_fn не вытащит — дублируем.
+  add_coverage_gap() { COVERAGE_GAPS+=("$1"); }
+  APP_SCAN_PRUNE_NAMES=('com.apple.*' AddressBook Calendars CallHistoryDB CallHistoryTransactions CloudDocs FaceTime Knowledge Mail Messages MobileSync Safari)
+  COVERAGE_GAPS=()
+  FACTS_FILE="$(mktemp)"
+  OUT="$(mktemp)"
+  ROOT="$(mktemp -d)"
+  mkdir -p "$ROOT/Application Support/ClashX/profiles" \
+           "$ROOT/Application Support/com.apple.Music/clash-inside" \
+           "$ROOT/Application Support/AddressBook/wireguard-inside" \
+           "$ROOT/Application Support/Vendor/Tailscale"
+}
+
+teardown() {
+  chmod -R u+rwx "$ROOT" 2>/dev/null || true
+  rm -rf "$ROOT" "$FACTS_FILE" "$OUT"
+}
+
+fact_value() {
+  awk -F'\t' -v l="$1" -v k="$2" '$2==l && $3==k {v=$4} END{print v}' "$FACTS_FILE"
+}
+
+@test "scan: находит конфиги приложений, в т.ч. на глубине 2 под несовпадающей папкой" {
+  scan_app_config_paths "$APPS_RE" "$ROOT"
+  [[ "$APP_CONFIG_PATHS" == *"/ClashX"* ]]
+  [[ "$APP_CONFIG_PATHS" == *"/Vendor/Tailscale"* ]]
+  [ "${#APP_SCAN_DENIED[@]}" -eq 0 ]
+}
+
+@test "scan: не заходит в com.apple.* и TCC-папки (источник запроса Apple Music/медиатеки)" {
+  scan_app_config_paths "$APPS_RE|com\.apple\.Music|AddressBook" "$ROOT"
+  [[ "$APP_CONFIG_PATHS" != *"clash-inside"* ]]
+  [[ "$APP_CONFIG_PATHS" != *"wireguard-inside"* ]]
+  # Имена самих папок остаются в выводе, как и раньше.
+  [[ "$APP_CONFIG_PATHS" == *"/com.apple.Music"* ]]
+  [[ "$APP_CONFIG_PATHS" == *"/AddressBook"* ]]
+}
+
+@test "scan: папки без доступа попадают в APP_SCAN_DENIED" {
+  [ "$(id -u)" -ne 0 ] || skip "root игнорирует права доступа"
+  mkdir -p "$ROOT/Application Support/Locked/clash"
+  chmod 000 "$ROOT/Application Support/Locked"
+  scan_app_config_paths "$APPS_RE" "$ROOT"
+  [ "${#APP_SCAN_DENIED[@]}" -eq 1 ]
+  [ "${APP_SCAN_DENIED[0]}" = "$ROOT/Application Support/Locked" ]
+}
+
+@test "report: без отказов — access=ok, отчёт не помечается неполным" {
+  APP_SCAN_DENIED=()
+  report_app_scan_access
+  grep -q '^>> APP_CONFIG_SCAN_ACCESS$' "$OUT"
+  grep -q '^access=ok$' "$OUT"
+  [ "$(fact_value coverage app_config_scan)" = "complete" ]
+  [ "${#COVERAGE_GAPS[@]}" -eq 0 ]
+}
+
+@test "report: при отказе macOS — access=denied, факт incomplete, подсказка про tccutil" {
+  APP_SCAN_DENIED=("/Users/u/Library/Application Support/X" "/Users/u/Library/Caches/Y")
+  __CFBundleIdentifier=com.apple.Terminal TERM_PROGRAM=Apple_Terminal report_app_scan_access
+  grep -q '^access=denied denied_count=2$' "$OUT"
+  grep -q '^denied: /Users/u/Library/Caches/Y$' "$OUT"
+  grep -q 'tccutil reset MediaLibrary com.apple.Terminal' "$OUT"
+  [ "$(fact_value coverage app_config_scan)" = "incomplete" ]
+  [ "${#COVERAGE_GAPS[@]}" -eq 1 ]
+  [[ "${COVERAGE_GAPS[0]}" == *"Шаг 7/12"*"не предоставила доступ"* ]]
+  [[ "${COVERAGE_GAPS[0]}" == *"включить Terminal"* ]]
+}
+
+@test "report: длинный список отказов сокращается" {
+  APP_SCAN_DENIED=()
+  for i in $(seq 1 12); do APP_SCAN_DENIED+=("/p/$i"); done
+  report_app_scan_access
+  [ "$(grep -c '^denied: /p/' "$OUT")" -eq 10 ]
+  grep -q '^denied: ... и ещё 2$' "$OUT"
+  [[ "${COVERAGE_GAPS[0]}" == *"(всего 12)"* ]]
+}
