@@ -1176,15 +1176,53 @@ report_app_scan_access() {
 
 # Вывод в консоль после шага 7: какие папки недоступны и что с этим делать.
 print_app_scan_denied() {
-  local d
   [ "${#APP_SCAN_DENIED[@]}" -gt 0 ] || return 0
   stop_step_spinner
-  printf "  %smacOS не дала доступ к папкам (%s шт.) — поиск конфигов неполный, это отмечено в отчёте:%s\n" "$YELLOW" "${#APP_SCAN_DENIED[@]}" "$RESET"
+  # Если только что предлагали выдать доступ — пути уже показаны, не повторяем.
+  [ "${APP_SCAN_ACCESS_REQUESTED:-0}" = "1" ] || print_app_scan_denied_paths
+  printf "  %sПоиск конфигов неполный, это отмечено в отчёте.%s\n" "$YELLOW" "$RESET"
+  [ "${APP_SCAN_ACCESS_REQUESTED:-0}" = "1" ] || printf "  %s%s%s\n" "$YELLOW" "$(tcc_recovery_hint)" "$RESET"
+}
+
+print_app_scan_denied_paths() {
+  local d
+  printf "  %smacOS не дала доступ к папкам (%s шт.):%s\n" "$YELLOW" "${#APP_SCAN_DENIED[@]}" "$RESET"
   for d in "${APP_SCAN_DENIED[@]:0:5}"; do
     printf "    %s%s%s\n" "$YELLOW" "${d/#"$HOME"/\~}" "$RESET"
   done
   [ "${#APP_SCAN_DENIED[@]}" -gt 5 ] && printf "    %s... и ещё %s (см. отчёт)%s\n" "$YELLOW" "$(( ${#APP_SCAN_DENIED[@]} - 5 ))" "$RESET"
-  printf "  %s%s%s\n" "$YELLOW" "$(tcc_recovery_hint)" "$RESET"
+  return 0
+}
+
+# Интерактивно запрашивает доступ к папкам, куда macOS не пустила шаг 7.
+# Для таких папок (защищённые системой данные, «Полный доступ к диску») macOS
+# не показывает системный диалог и не даёт выдать доступ программно — поэтому
+# скрипт сам открывает нужный раздел Системных настроек, ждёт пользователя и
+# повторяет поиск. Аргументы — как у scan_app_config_paths.
+# Пропускается в неинтерактивном режиме (нет TTY или --yes), чтобы не зависать.
+APP_SCAN_ACCESS_REQUESTED=0
+request_app_scan_access() {
+  local app reply=""
+  [ "${#APP_SCAN_DENIED[@]}" -gt 0 ] || return 0
+  [ "${FLAG_YES:-0}" = "1" ] && return 0
+  [ -t 1 ] || [ "${APP_SCAN_FORCE_INTERACTIVE:-0}" = "1" ] || return 0
+  app="$(terminal_app_name)"
+  stop_step_spinner
+  print_app_scan_denied_paths
+  printf "  %sДля этих папок macOS не показывает запрос — доступ выдаётся вручную: «Полный доступ к диску» для %s.%s\n" "$YELLOW" "$app" "$RESET"
+  ask_yes_no "  Открыть Системные настройки и выдать доступ сейчас?" || return 0
+  APP_SCAN_ACCESS_REQUESTED=1
+  open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" >/dev/null 2>&1 || true
+  printf "  %sВ открывшемся окне включите %s (если его нет в списке: «+» → Программы → Утилиты → %s).%s\n" "$YELLOW" "$app" "$app" "$RESET"
+  printf "  %sЕсли macOS предложит завершить %s — выберите «Позже», иначе диагностика прервётся.%s\n" "$YELLOW" "$app" "$RESET"
+  # fd 3 — TTY пользователя (см. exec 3</dev/tty в начале); в тестах подменяется.
+  read -r -u "${APP_SCAN_INPUT_FD:-3}" -p "  Нажмите Enter, когда доступ выдан (или чтобы продолжить без него)... " reply || true
+  scan_app_config_paths "$@"
+  if [ "${#APP_SCAN_DENIED[@]}" -eq 0 ]; then
+    printf "  %sДоступ получен, поиск конфигов выполнен полностью.%s\n" "$CYAN" "$RESET"
+  else
+    printf "  %sДоступ пока не действует. Права применятся после перезапуска %s — перезапустите его и запустите скрипт снова.%s\n" "$YELLOW" "$app" "$RESET"
+  fi
 }
 
 detect_dpi_bypass() {
@@ -1780,13 +1818,15 @@ fi
 
 say_step "7/12 Конфиги приложений"
 printf "  %sИщем конфиги VPN/прокси по именам папок в ~/Library (содержимое не читается).%s\n" "$YELLOW" "$RESET"
-printf "  %sЕсли macOS спросит доступ для %s — разрешите, иначе шаг будет помечен как неполный.%s\n" "$YELLOW" "$(terminal_app_name)" "$RESET"
+printf "  %sЕсли доступа к части папок нет, скрипт предложит выдать его (macOS может спросить и сама) — без него шаг будет неполным.%s\n" "$YELLOW" "$RESET"
 say_step_detail "Сканируем типовые пути конфигов VPN/Proxy приложений"
 say_step_detail "Ищем DPI-обходы (ZapretMac, zapret, SpoofDPI, ByeDPI)"
 # 7. Конфиги приложений (папки)
 APPS_PATHS="happ|ngate|cryptopro|xray|v2ray|qv2ray|clash|clashx|shadowrocket|shadowsocks|quantumult|surge|loon|stash|adguard|nextdns|wireguard|tailscale|headscale|mullvad|proton|expressvpn|nordvpn|surfshark|pia|privateinternetaccess|ivpn|windscribe|purevpn|vypr|cyberghost|tunnelbear|astrill|openvpn|viscosity|tunnelblick|shimo|vpntracker|globalprotect|forticlient|anyconnect|cisco|zerotier|netbird|littlesnitch|lulu|tripmode|murus|goodbyedpi|zapret|antizapret|spoofdpi|byedpi|ciadpi|unblockpro"
 echo -e "\n>> Конфиги приложений" >> "$OUT"
-scan_app_config_paths "$APPS_PATHS" ~/Library/Preferences ~/Library/Application\ Support ~/Library/Caches /Applications
+APP_SCAN_ROOTS=(~/Library/Preferences ~/Library/Application\ Support ~/Library/Caches /Applications)
+scan_app_config_paths "$APPS_PATHS" "${APP_SCAN_ROOTS[@]}"
+request_app_scan_access "$APPS_PATHS" "${APP_SCAN_ROOTS[@]}"
 printf '%s\n' "$APP_CONFIG_PATHS" >> "$OUT"
 report_app_scan_access
 print_app_scan_denied

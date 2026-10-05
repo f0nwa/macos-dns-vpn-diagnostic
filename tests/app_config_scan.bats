@@ -8,7 +8,7 @@ load 'lib/extract'
 APPS_RE='clash|wireguard|tailscale'
 
 setup() {
-  source_fns emit_fact has_fact join_by_semicolon scan_app_config_paths terminal_app_name tcc_recovery_hint report_app_scan_access print_app_scan_denied
+  source_fns emit_fact has_fact join_by_semicolon scan_app_config_paths terminal_app_name tcc_recovery_hint report_app_scan_access print_app_scan_denied print_app_scan_denied_paths request_app_scan_access
   # Однострочные определения из скрипта extract_fn не вытащит — дублируем.
   add_coverage_gap() { COVERAGE_GAPS+=("$1"); }
   APP_SCAN_PRUNE_NAMES=('com.apple.*' AddressBook Calendars CallHistoryDB CallHistoryTransactions CloudDocs FaceTime Knowledge Mail Messages MobileSync Safari)
@@ -108,4 +108,71 @@ fact_value() {
   [ "$(TERM_PROGRAM=Apple_Terminal terminal_app_name)" = "Terminal" ]
   [ "$(TERM_PROGRAM=iTerm.app terminal_app_name)" = "iTerm" ]
   [ "$(TERM_PROGRAM= terminal_app_name)" = "Terminal" ]
+}
+
+# --- Интерактивный запрос доступа -------------------------------------------
+
+setup_request() {
+  [ "$(id -u)" -ne 0 ] || skip "root игнорирует права доступа"
+  stop_step_spinner() { :; }
+  YELLOW=""; RESET=""; CYAN=""
+  FLAG_YES=0
+  APP_SCAN_FORCE_INTERACTIVE=1
+  APP_SCAN_ACCESS_REQUESTED=0
+  OPEN_LOG="$(mktemp)"
+  LOCKED="$ROOT/Application Support/Locked"
+  mkdir -p "$LOCKED/clash"
+  chmod 000 "$LOCKED"
+  # fd 3 занят самим bats — ввод пользователя читаем из fd 4.
+  exec 4</dev/null
+  APP_SCAN_INPUT_FD=4
+}
+
+@test "request: согласие -> открываются настройки «Полный доступ к диску», после выдачи доступа поиск повторяется" {
+  setup_request
+  ask_yes_no() { return 0; }
+  # «Пользователь выдал доступ» в настройках.
+  open() { echo "$1" >> "$OPEN_LOG"; chmod 755 "$LOCKED"; }
+  scan_app_config_paths "$APPS_RE" "$ROOT"
+  [ "${#APP_SCAN_DENIED[@]}" -eq 1 ]
+  request_app_scan_access "$APPS_RE" "$ROOT" > "$OUT.console"
+  grep -q 'Privacy_AllFiles' "$OPEN_LOG"
+  [ "${#APP_SCAN_DENIED[@]}" -eq 0 ]
+  [[ "$APP_CONFIG_PATHS" == *"/Locked/clash"* ]]
+  grep -q 'Доступ получен' "$OUT.console"
+  rm -f "$OPEN_LOG" "$OUT.console"
+}
+
+@test "request: доступ так и не выдан -> подсказка перезапустить терминал, отказ остаётся" {
+  setup_request
+  ask_yes_no() { return 0; }
+  open() { echo "$1" >> "$OPEN_LOG"; }
+  scan_app_config_paths "$APPS_RE" "$ROOT"
+  TERM_PROGRAM=Apple_Terminal request_app_scan_access "$APPS_RE" "$ROOT" > "$OUT.console"
+  [ "${#APP_SCAN_DENIED[@]}" -eq 1 ]
+  grep -q 'после перезапуска Terminal' "$OUT.console"
+  rm -f "$OPEN_LOG" "$OUT.console"
+}
+
+@test "request: отказ пользователя -> настройки не открываются" {
+  setup_request
+  ask_yes_no() { return 1; }
+  open() { echo "$1" >> "$OPEN_LOG"; }
+  scan_app_config_paths "$APPS_RE" "$ROOT"
+  request_app_scan_access "$APPS_RE" "$ROOT" >/dev/null
+  [ ! -s "$OPEN_LOG" ]
+  [ "${#APP_SCAN_DENIED[@]}" -eq 1 ]
+  rm -f "$OPEN_LOG"
+}
+
+@test "request: --yes (неинтерактивно) -> ничего не спрашивает и не ждёт" {
+  setup_request
+  FLAG_YES=1
+  ask_yes_no() { echo ASKED; return 0; }
+  open() { echo "$1" >> "$OPEN_LOG"; }
+  scan_app_config_paths "$APPS_RE" "$ROOT"
+  run request_app_scan_access "$APPS_RE" "$ROOT"
+  [ -z "$output" ]
+  [ ! -s "$OPEN_LOG" ]
+  rm -f "$OPEN_LOG"
 }
