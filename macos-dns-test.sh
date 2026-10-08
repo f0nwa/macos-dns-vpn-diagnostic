@@ -123,7 +123,8 @@ if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   YELLOW="${ESC}[33m"
   RED="${ESC}[31m"
   MAGENTA="${ESC}[35m"
-  DETAIL="${ESC}[90m"
+  # Детали выводим обычным цветом текста: серый (ANSI 90) на тёмных темах терминала не виден.
+  DETAIL=""
   RESET="${ESC}[0m"
 else
   BOLD="" CYAN="" GREEN="" YELLOW="" RED="" MAGENTA="" DETAIL="" RESET=""
