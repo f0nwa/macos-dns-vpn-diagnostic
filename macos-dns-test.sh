@@ -1,9 +1,11 @@
 #!/bin/bash
 # Description: Полная диагностика DNS/VPN/Proxy на macOS с классификацией причин и e2e-проверкой.
 # Author: f0nwa
-# Last Modified: 2026-10-05
+# Last Modified: 2026-10-08
 
 set -u
+
+SCRIPT_VERSION="2026-10-08"
 
 FLAG_DOMAIN=""
 FLAG_YES=0
@@ -65,11 +67,37 @@ if [ -t 1 ]; then
   clear
 fi
 
-CYAN=$'\033[36m'
-MAGENTA=$'\033[35m'
-DETAIL=$'\033[90m'
-YELLOW=$'\033[33m'
-RESET=$'\033[0m'
+# Цвета только в терминале и без NO_COLOR (https://no-color.org).
+ESC=$'\033'
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  BOLD="${ESC}[1m"
+  CYAN="${ESC}[36m"
+  GREEN="${ESC}[32m"
+  YELLOW="${ESC}[33m"
+  RED="${ESC}[31m"
+  MAGENTA="${ESC}[35m"
+  DETAIL="${ESC}[90m"
+  RESET="${ESC}[0m"
+else
+  BOLD="" CYAN="" GREEN="" YELLOW="" RED="" MAGENTA="" DETAIL="" RESET=""
+fi
+
+# Единый вид вывода: заголовок блока, серая деталь, и строки с маркером результата.
+title() {
+  printf '\n%s%s%s%s\n' "$BOLD" "$CYAN" "$1" "$RESET"
+}
+info() {
+  printf '  %s%s%s\n' "$DETAIL" "$1" "$RESET"
+}
+warn() {
+  printf '  %s! %s%s\n' "$YELLOW" "$1" "$RESET"
+}
+fail() {
+  printf '  %s✗ %s%s\n' "$RED" "$1" "$RESET"
+}
+ok() {
+  printf '  %s✓%s %s%s%s\n' "$GREEN" "$RESET" "$DETAIL" "$1" "$RESET"
+}
 
 # Читаем интерактивные ответы из TTY, даже если скрипт запускается из pipe.
 if [ -r /dev/tty ]; then
@@ -80,7 +108,7 @@ fi
 
 say_step() {
   flush_step_details
-  printf "\n%s%s%s\n" "$CYAN" "$1" "$RESET"
+  title "$1"
 }
 say_step_detail() {
   local msg="$1"
@@ -96,7 +124,7 @@ start_step_spinner() {
   stop_step_spinner
   local cols max_len display_message
   cols="$(tput cols 2>/dev/null || echo 80)"
-  max_len=$((cols - 12))
+  max_len=$((cols - 8))
   if [ "$max_len" -lt 20 ]; then
     max_len=20
   fi
@@ -107,12 +135,12 @@ start_step_spinner() {
   fi
   # Без собственного trap: спиннер завершается только KILL (см. stop_step_spinner).
   (
-    local i=0
-    local frames='|/-\'
+    local f
     while :; do
-      i=$(( (i + 1) % 4 ))
-      printf "\r\033[2K%s[%s] %s%s" "$DETAIL" "${frames:$i:1}" "$display_message" "$RESET"
-      sleep 0.2
+      for f in ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏; do
+        printf "\r\033[2K  %s%s%s %s%s%s" "$CYAN" "$f" "$RESET" "$DETAIL" "$display_message" "$RESET"
+        sleep 0.1
+      done
     done
   ) &
   SPINNER_PID=$!
@@ -178,9 +206,11 @@ start_sudo_keepalive() {
   if [ "${EUID:-$(id -u)}" -eq 0 ]; then
     return 0
   fi
-  echo
-  echo "Введите локальный пароль администратора для доступа в систему..."
-  if sudo -v; then
+  title "Требуются права администратора"
+  info "Сейчас потребуется ввести локальный пароль от вашей учётной записи macOS (тот, которым вы входите в систему)."
+  info "Символы при вводе не отображаются, это нормально. После ввода нажмите Enter."
+  printf '\n'
+  if sudo -v -p "Пароль учётной записи Mac: "; then
     (
       while :; do
         sudo -n true 2>/dev/null || exit 0
@@ -189,7 +219,7 @@ start_sudo_keepalive() {
     ) &
     SUDO_KEEPALIVE_PID=$!
   else
-    echo -e "${YELLOW}Не удалось получить sudo-сессию заранее. Возможны дополнительные запросы пароля в ходе диагностики.${RESET}"
+    warn "Не удалось получить sudo-сессию заранее. Возможны дополнительные запросы пароля в ходе диагностики."
   fi
 }
 flush_step_details() {
@@ -199,23 +229,11 @@ flush_step_details() {
   fi
   stop_step_spinner
   for item in "${STEP_DETAILS[@]}"; do
-    printf "  %s- %s%s\n" "$DETAIL" "$item" "$RESET"
+    ok "$item"
   done
   STEP_DETAILS=()
 }
 trap 'stop_sudo_keepalive' EXIT INT TERM
-
-printf "%s" "$CYAN"
-cat <<'EOF'
-
-                         ____  _____    ____  _   _______    ______          __ 
-   ____ ___  ____ ______/ __ \/ ___/   / __ \/ | / / ___/   /_  __/__  _____/ /_
-  / __ `__ \/ __ `/ ___/ / / /\__ \   / / / /  |/ /\__ \     / / / _ \/ ___/ __/
- / / / / / / /_/ / /__/ /_/ /___/ /  / /_/ / /|  /___/ /    / / /  __(__  ) /_  
-/_/ /_/ /_/\__,_/\___/\____//____/  /_____/_/ |_//____/    /_/  \___/____/\__/  
-                                                                                                                                                    
-EOF
-printf "%s" "$RESET"
 
 USER_TAG="${USER:-user}"
 HOST_TAG="$(hostname -s 2>/dev/null || echo host)"
@@ -228,10 +246,11 @@ fi
 echo ">> DNS+VPN/Прокси Диагностика Полная ($(date))" > "$OUT"
 echo -e "\n>> RAW_APPENDIX" >> "$OUT"
 
+title "Диагностика DNS / VPN / Прокси на macOS"
+info "Пользователь: ${USER_TAG}"
+info "Хост: ${HOST_TAG}   Версия скрипта: ${SCRIPT_VERSION}"
+
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-  echo -e "${YELLOW}Скрипт запущен без sudo. После ввода домена будет запрошен пароль.${RESET}"
-  echo -e "${YELLOW}Подсказка: можно запустить сразу с sudo для более ровного прохождения шагов.${RESET}"
-  echo
   echo -e "\n>> PRIVILEGE_NOTICE" >> "$OUT"
   echo "run_mode=non_root; elevated_steps_require_sudo=yes" >> "$OUT"
 fi
@@ -251,18 +270,28 @@ add_coverage_gap() { COVERAGE_GAPS+=("$1"); }
 DNS_SERVER_FAILS=()
 
 ask_yes_no() {
-  # Возвращает 0 для yes и 1 для no; повторяет запрос до корректного ответа.
-  local prompt="$1" reply=""
+  # ask_yes_no "вопрос" [y|n — ответ по умолчанию, n если не указан] ["описание"]
+  # Возвращает 0 для «да» и 1 для «нет»; повторяет запрос до корректного ответа.
+  local question="$1" default="${2:-n}" desc="${3:-}" hint reply="" line
+  printf '\n%s?%s %s%s%s\n' "$CYAN" "$RESET" "$BOLD" "$question" "$RESET"
+  if [ -n "$desc" ]; then
+    while IFS= read -r line; do
+      printf '  %s%s%s\n' "$DETAIL" "$line" "$RESET"
+    done <<< "$desc"
+  fi
   if [ "$FLAG_YES" = "1" ]; then
-    echo "$prompt [y/N]: y (авто, --yes)"
+    printf '  %s›%s %sда (авто, --yes)%s\n' "$YELLOW" "$RESET" "$DETAIL" "$RESET"
     return 0
   fi
+  if [ "$default" = "y" ]; then hint="[Д/н]"; else hint="[д/Н]"; fi
   while :; do
-    read -r -u 3 -p "$prompt [y/N]: " reply
+    printf '  %s›%s %s%s%s ' "$YELLOW" "$RESET" "$YELLOW" "$hint" "$RESET"
+    read -r -u 3 reply || return 1
     case "${reply:-}" in
-      y|Y|yes|YES) return 0 ;;
-      n|N|no|NO|"") return 1 ;;
-      *) echo "Введите y или n." ;;
+      "") [ "$default" = "y" ]; return ;;
+      y|Y|yes|YES|д|Д|да|Да|ДА) return 0 ;;
+      n|N|no|NO|н|Н|нет|Нет|НЕТ) return 1 ;;
+      *) warn "Введите д или н." ;;
     esac
   done
 }
@@ -1191,18 +1220,18 @@ print_app_scan_denied() {
   stop_step_spinner
   # Если только что предлагали выдать доступ — пути уже показаны, не повторяем.
   [ "${APP_SCAN_ACCESS_REQUESTED:-0}" = "1" ] || print_app_scan_denied_paths
-  printf "  %sПоиск конфигов неполный, это отмечено в отчёте.%s\n" "$YELLOW" "$RESET"
-  [ "${APP_SCAN_ACCESS_REQUESTED:-0}" = "1" ] || printf "  %s%s%s\n" "$YELLOW" "$(tcc_recovery_hint)" "$RESET"
+  warn "Поиск конфигов неполный, это отмечено в отчёте."
+  [ "${APP_SCAN_ACCESS_REQUESTED:-0}" = "1" ] || info "$(tcc_recovery_hint)"
 }
 
 print_app_scan_denied_paths() {
   # Тильда через переменную: в bash 3.2 (macOS) "\~" в замене оставляет обратный слэш.
   local d tilde='~'
-  printf "  %smacOS не дала доступ к папкам (%s шт.):%s\n" "$YELLOW" "${#APP_SCAN_DENIED[@]}" "$RESET"
+  warn "macOS не дала доступ к папкам (${#APP_SCAN_DENIED[@]} шт.):"
   for d in "${APP_SCAN_DENIED[@]:0:5}"; do
-    printf "    %s%s%s\n" "$YELLOW" "${d/#"$HOME"/$tilde}" "$RESET"
+    info "  ${d/#"$HOME"/$tilde}"
   done
-  [ "${#APP_SCAN_DENIED[@]}" -gt 5 ] && printf "    %s... и ещё %s (см. отчёт)%s\n" "$YELLOW" "$(( ${#APP_SCAN_DENIED[@]} - 5 ))" "$RESET"
+  [ "${#APP_SCAN_DENIED[@]}" -gt 5 ] && info "  ... и ещё $(( ${#APP_SCAN_DENIED[@]} - 5 )) (см. отчёт)"
   return 0
 }
 
@@ -1213,6 +1242,9 @@ print_app_scan_denied_paths() {
 # повторяет поиск. Аргументы — как у scan_app_config_paths.
 # Пропускается в неинтерактивном режиме (нет TTY или --yes), чтобы не зависать.
 APP_SCAN_ACCESS_REQUESTED=0
+# 1 только если «Полный доступ к диску» выдан во время этого запуска: в конце
+# напоминаем отключить его обратно.
+FDA_GRANTED_NOW=0
 request_app_scan_access() {
   local app reply=""
   [ "${#APP_SCAN_DENIED[@]}" -gt 0 ] || return 0
@@ -1221,19 +1253,22 @@ request_app_scan_access() {
   app="$(terminal_app_name)"
   stop_step_spinner
   print_app_scan_denied_paths
-  printf "  %sДля этих папок macOS не показывает запрос — доступ выдаётся вручную: «Полный доступ к диску» для %s.%s\n" "$YELLOW" "$app" "$RESET"
-  ask_yes_no "  Открыть Системные настройки и выдать доступ сейчас?" || return 0
+  info "Для этих папок macOS не показывает запрос — доступ выдаётся вручную: «Полный доступ к диску» для $app."
+  ask_yes_no "Открыть Системные настройки и выдать доступ сейчас?" y || return 0
   APP_SCAN_ACCESS_REQUESTED=1
   open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" >/dev/null 2>&1 || true
-  printf "  %sВ открывшемся окне включите %s (если его нет в списке: «+» → Программы → Утилиты → %s).%s\n" "$YELLOW" "$app" "$app" "$RESET"
-  printf "  %sЕсли macOS предложит завершить %s — выберите «Позже», иначе диагностика прервётся.%s\n" "$YELLOW" "$app" "$RESET"
+  info "1. В открывшемся окне включите $app (если его нет в списке: «+» → Программы → Утилиты → $app)."
+  info "2. Если macOS предложит завершить $app — выберите «Позже», иначе диагностика прервётся."
+  info "3. Вернитесь сюда и нажмите Enter."
   # fd 3 — TTY пользователя (см. exec 3</dev/tty в начале); в тестах подменяется.
-  read -r -u "${APP_SCAN_INPUT_FD:-3}" -p "  Нажмите Enter, когда доступ выдан (или чтобы продолжить без него)... " reply || true
+  printf '  %s›%s Нажмите Enter, когда доступ выдан (или чтобы продолжить без него)... ' "$YELLOW" "$RESET"
+  read -r -u "${APP_SCAN_INPUT_FD:-3}" reply || true
   scan_app_config_paths "$@"
   if [ "${#APP_SCAN_DENIED[@]}" -eq 0 ]; then
-    printf "  %sДоступ получен, поиск конфигов выполнен полностью.%s\n" "$CYAN" "$RESET"
+    ok "Доступ получен, поиск конфигов выполнен полностью."
+    FDA_GRANTED_NOW=1
   else
-    printf "  %sДоступ пока не действует. Права применятся после перезапуска %s — перезапустите его и запустите скрипт снова.%s\n" "$YELLOW" "$app" "$RESET"
+    warn "Доступ пока не действует. Права применятся после перезапуска $app — перезапустите его и запустите скрипт снова."
   fi
 }
 
@@ -1253,7 +1288,7 @@ reveal_report_in_finder() {
   else
     open -R "$report" >/dev/null 2>&1 || return 0
   fi
-  printf "%sОтчёт выделен в Finder — его можно перетащить в мессенджер или письмо.%s\n\n" "$CYAN" "$RESET"
+  info "Отчёт выделен в Finder — его можно перетащить в мессенджер или письмо."
 }
 
 detect_dpi_bypass() {
@@ -1638,15 +1673,21 @@ if [ -n "$FLAG_DOMAIN" ]; then
   fi
   TEST_DOMAIN="$INPUT_DOMAIN_TRIMMED"
 else
+  printf '\n%s?%s %sДомен для проверки DNS%s\n' "$CYAN" "$RESET" "$BOLD" "$RESET"
+  info "Латиницей или кириллицей, в формате name.zone (например example.com)."
   while :; do
-    read -r -u 3 -p "Введите домен для проверки DNS: " INPUT_DOMAIN
+    printf '  %s›%s ' "$YELLOW" "$RESET"
+    if ! read -r -u 3 INPUT_DOMAIN; then
+      fail "Нет терминала для ввода домена. Укажите его флагом --domain=<host>." >&2
+      exit 2
+    fi
     INPUT_DOMAIN_TRIMMED="$(printf '%s' "${INPUT_DOMAIN:-}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
     if [ -z "$INPUT_DOMAIN_TRIMMED" ]; then
-      echo "Домен не введен. Повторите ввод."
+      warn "Домен не введён. Повторите ввод."
       continue
     fi
     if ! printf '%s' "$INPUT_DOMAIN_TRIMMED" | grep -Eq '^[^.].*\..*[^.]$'; then
-      echo "Некорректный домен: требуется формат вида name.zone (одна точка без меток недопустима)."
+      warn "Некорректный домен: требуется формат вида name.zone (одна точка без меток недопустима)."
       continue
     fi
     if [ -n "$INPUT_DOMAIN_TRIMMED" ]; then
@@ -1668,30 +1709,32 @@ if printf '%s' "$TEST_DOMAIN" | LC_ALL=C grep -q '[^ -~]'; then
     IDN_PUNY="$("$PYTHON3_BIN" -c 'import sys; print(sys.argv[1].encode("idna").decode("ascii"))' "$TEST_DOMAIN" 2>/dev/null || true)"
     if [ -n "${IDN_PUNY:-}" ]; then
       TEST_DOMAIN_QUERY="$IDN_PUNY"
-      echo
-      echo -e "${CYAN}IDN нормализация для DNS-запросов: $TEST_DOMAIN -> $TEST_DOMAIN_QUERY${RESET}"
+      title "Кириллический домен"
+      ok "Punycode для DNS-запросов: $TEST_DOMAIN → $TEST_DOMAIN_QUERY"
       emit_fact resolver idn_normalized yes "python3 idna (${PYTHON3_BIN})"
       emit_fact resolver dns_query_domain "$TEST_DOMAIN_QUERY" "idna"
     else
       emit_fact resolver idn_normalized no "python3 idna (${PYTHON3_BIN})"
     fi
   else
-    echo
+    title "Кириллический домен"
     if [ "$PYTHON3_SKIP_REASON" = "apple_stub_missing_clt" ]; then
-      echo -e "${CYAN}Обнаружен IDN-домен, но /usr/bin/python3 недоступен без Command Line Tools.${RESET}"
-      echo -e "${CYAN}Переходим на установку Homebrew + python3.${RESET}"
+      warn "Нужен python3, но /usr/bin/python3 недоступен без Command Line Tools."
+      info "Переходим на установку Homebrew + python3."
       emit_fact resolver idn_normalized no "python3 apple stub skipped"
     else
-      echo -e "${CYAN}Обнаружен IDN-домен, но python3 не найден.${RESET}"
+      warn "Нужен python3 для кириллического домена, но он не найден."
       emit_fact resolver idn_normalized no "python3 missing"
     fi
     AUTO_INSTALL_PYTHON_WITH_BREW=no
 
     if ! command -v brew >/dev/null 2>&1; then
-      if ask_yes_no "Не найден Homebrew. Установить Homebrew и python3 автоматически сейчас?"; then
+      if ask_yes_no "Установить Homebrew и python3?" n \
+"Для кириллического домена нужен python3 (он переводит домен в punycode), а Homebrew на этом Mac не найден.
+Установка идёт автоматически и может занять несколько минут."; then
         AUTO_INSTALL_PYTHON_WITH_BREW=yes
         if command -v curl >/dev/null 2>&1; then
-          echo "Устанавливаем Homebrew..."
+          info "Устанавливаем Homebrew..."
           if NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; then
             emit_fact resolver brew_install_attempt success "homebrew install script"
             if [ -x /opt/homebrew/bin/brew ]; then
@@ -1711,11 +1754,16 @@ if printf '%s' "$TEST_DOMAIN" | LC_ALL=C grep -q '[^ -~]'; then
     fi
 
     if command -v brew >/dev/null 2>&1; then
-      if [ "$AUTO_INSTALL_PYTHON_WITH_BREW" = "yes" ] || ask_yes_no "Установить python3 через Homebrew сейчас?"; then
-        echo "Пробуем установить python3 через Homebrew..."
+      if [ "$AUTO_INSTALL_PYTHON_WITH_BREW" = "yes" ] || ask_yes_no "Установить python3 через Homebrew?" n \
+"Нужен для перевода кириллического домена в punycode."; then
+        start_step_spinner "Устанавливаем python3 через Homebrew"
         if brew install python >/dev/null 2>&1; then
+          stop_step_spinner
+          ok "python3 установлен"
           emit_fact resolver python3_install_attempt success "brew install python"
         else
+          stop_step_spinner
+          fail "Не удалось установить python3 через Homebrew"
           emit_fact resolver python3_install_attempt failed "brew install python"
         fi
       else
@@ -1731,8 +1779,7 @@ if printf '%s' "$TEST_DOMAIN" | LC_ALL=C grep -q '[^ -~]'; then
       IDN_PUNY="$("$PYTHON3_BIN" -c 'import sys; print(sys.argv[1].encode("idna").decode("ascii"))' "$TEST_DOMAIN" 2>/dev/null || true)"
       if [ -n "${IDN_PUNY:-}" ]; then
         TEST_DOMAIN_QUERY="$IDN_PUNY"
-        echo
-        echo -e "${CYAN}IDN нормализация после установки: $TEST_DOMAIN -> $TEST_DOMAIN_QUERY${RESET}"
+        ok "Punycode для DNS-запросов: $TEST_DOMAIN → $TEST_DOMAIN_QUERY"
         emit_fact resolver idn_normalized yes "python3 idna post-install (${PYTHON3_BIN})"
         emit_fact resolver dns_query_domain "$TEST_DOMAIN_QUERY" "idna post-install"
       else
@@ -1741,16 +1788,17 @@ if printf '%s' "$TEST_DOMAIN" | LC_ALL=C grep -q '[^ -~]'; then
     fi
 
     if [ "$TEST_DOMAIN_QUERY" = "$TEST_DOMAIN" ]; then
-      echo
-      echo "Авто-конвертация IDN недоступна."
-      echo "Рекомендуется ввести punycode-домен (например xn--...)."
-      read -r -u 3 -p "Введите punycode для DNS-запросов (Enter = оставить исходный): " MANUAL_PUNY
+      warn "Автоматически перевести домен в punycode не удалось."
+      printf '\n%s?%s %sPunycode-домен для DNS-запросов%s\n' "$CYAN" "$RESET" "$BOLD" "$RESET"
+      info "Например xn--... Enter — оставить исходный домен."
+      printf '  %s›%s ' "$YELLOW" "$RESET"
+      read -r -u 3 MANUAL_PUNY || true
       MANUAL_PUNY_TRIMMED="$(printf '%s' "${MANUAL_PUNY:-}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
       if [ -n "$MANUAL_PUNY_TRIMMED" ]; then
         TEST_DOMAIN_QUERY="$MANUAL_PUNY_TRIMMED"
         emit_fact resolver idn_normalized yes "manual punycode"
         emit_fact resolver dns_query_domain "$TEST_DOMAIN_QUERY" "manual punycode"
-        echo -e "${CYAN}Используем вручную заданный query-домен: $TEST_DOMAIN_QUERY${RESET}"
+        ok "Используем заданный вручную домен для запросов: $TEST_DOMAIN_QUERY"
       fi
     fi
   fi
@@ -1849,8 +1897,8 @@ else
 fi
 
 say_step "7/12 Конфиги приложений"
-printf "  %sИщем конфиги VPN/прокси по именам папок в ~/Library (содержимое не читается).%s\n" "$YELLOW" "$RESET"
-printf "  %sЕсли доступа к части папок нет, скрипт предложит выдать его (macOS может спросить и сама) — без него шаг будет неполным.%s\n" "$YELLOW" "$RESET"
+info "Ищем конфиги VPN/прокси по именам папок в ~/Library (содержимое не читается)."
+info "Если доступа к части папок нет, скрипт предложит выдать его (macOS может спросить и сама) — без него шаг будет неполным."
 say_step_detail "Сканируем типовые пути конфигов VPN/Proxy приложений"
 say_step_detail "Ищем DPI-обходы (ZapretMac, zapret, SpoofDPI, ByeDPI)"
 # 7. Конфиги приложений (папки)
@@ -2283,40 +2331,42 @@ fi
 
 flush_step_details
 
-GREEN=$'\033[32m'
-RED=$'\033[31m'
+title "Результат проверки"
 if [ "$DNS_ONLY_VERDICT" = "PASS" ] && [ "$E2E_VERDICT" = "PASS" ]; then
-  echo
-  echo -e "${GREEN}ТЕСТ УСПЕШНО ПРОЙДЕН: хост доступен, TLS и HTTP в норме${RESET}"
+  printf '  %s%s✓ %s%s\n' "$BOLD" "$GREEN" "ТЕСТ УСПЕШНО ПРОЙДЕН: хост доступен, TLS и HTTP в норме" "$RESET"
 elif [ "$DNS_ONLY_VERDICT" = "PASS" ] && [ "$PRIMARY_CLASSIFICATION" = "tls_certificate_or_trust_issue" ]; then
-  echo
-  echo -e "${YELLOW}ТЕСТ ЧАСТИЧНО ПРОЙДЕН: хост доступен, но TLS сертификат не прошел проверку доверия${RESET}"
+  printf '  %s%s! %s%s\n' "$BOLD" "$YELLOW" "ТЕСТ ЧАСТИЧНО ПРОЙДЕН: хост доступен, но TLS сертификат не прошел проверку доверия" "$RESET"
 else
-  echo
-  echo -e "${RED}ТЕСТ НЕ ПРОЙДЕН: есть проблемы с доступностью, резолвингом или TLS${RESET}"
+  printf '  %s%s✗ %s%s\n' "$BOLD" "$RED" "ТЕСТ НЕ ПРОЙДЕН: есть проблемы с доступностью, резолвингом или TLS" "$RESET"
 fi
 if [ "${#CAUSES[@]}" -eq 0 ]; then
-  echo "Не найдено явных проблем с DNS по эвристике."
+  ok "Не найдено явных проблем с DNS по эвристике."
 else
-  echo
-  echo "Возможные проблемы:"
+  title "Возможные проблемы"
   for c in "${CAUSES[@]}"; do
-    echo "- $c"
+    warn "$c"
   done
 fi
 if [ "${#NOTES[@]}" -gt 0 ]; then
-  echo
-  echo "К сведению (не проблемы):"
+  title "К сведению (не проблемы)"
   for c in "${NOTES[@]}"; do
-    echo -e "${CYAN}- $c${RESET}"
+    info "$c"
   done
 fi
 if [ "${#COVERAGE_GAPS[@]}" -gt 0 ]; then
-  echo
-  echo -e "${YELLOW}ОТЧЁТ НЕПОЛНЫЙ — часть проверок не выполнена:${RESET}"
+  title "Отчёт неполный: часть проверок не выполнена"
   for c in "${COVERAGE_GAPS[@]}"; do
-    echo -e "${YELLOW}- $c${RESET}"
+    warn "$c"
   done
 fi
-printf "\n${CYAN}Отчет сохранен в: ${MAGENTA}%s${RESET}\n\n" "$OUT"
+title "Отчёт"
+info "Сохранён в: ${MAGENTA}${OUT}${RESET}"
 reveal_report_in_finder "$OUT"
+# «Полный доступ к диску» — широкое разрешение: предлагаем вернуть его обратно,
+# но только если этот запуск сам его запрашивал.
+if [ "$FDA_GRANTED_NOW" -eq 1 ]; then
+  title "Доступ к диску"
+  info "«Полный доступ к диску» для $(terminal_app_name) был нужен только на время работы скрипта."
+  info "Его можно отключить: Системные настройки → Конфиденциальность и безопасность → Полный доступ к диску → выключите переключатель рядом с $(terminal_app_name)."
+fi
+printf '\n'

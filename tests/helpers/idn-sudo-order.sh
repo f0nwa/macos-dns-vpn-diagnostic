@@ -2,10 +2,11 @@
 # Выполняет настоящий этап подготовки домена без установки пакетов и sudo.
 set -eu
 source "$(dirname "$0")/../lib/extract.bash"
-source_fns start_sudo_keepalive stop_sudo_keepalive
+source_fns start_sudo_keepalive stop_sudo_keepalive title info warn ok fail
 trap stop_sudo_keepalive EXIT
 FLAG_DOMAIN='честныйзнак.рф'
-YELLOW='' RESET='' CYAN=''
+BOLD='' CYAN='' GREEN='' YELLOW='' RED='' MAGENTA='' DETAIL='' RESET=''
+FLAG_YES=0
 SUDO_TEST_AUTH=no
 export SUDO_TEST_AUTH
 sudo() {

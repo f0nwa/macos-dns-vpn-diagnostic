@@ -5,8 +5,8 @@
 load 'lib/extract'
 
 setup() {
-  source_fns reveal_report_in_finder
-  CYAN=""; RESET=""
+  source_fns reveal_report_in_finder info
+  DETAIL=""; RESET=""
   FLAG_NO_OPEN=0
   REVEAL_FORCE_INTERACTIVE=1
   unset CI SUDO_USER

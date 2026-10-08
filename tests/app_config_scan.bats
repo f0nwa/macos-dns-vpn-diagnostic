@@ -8,7 +8,9 @@ load 'lib/extract'
 APPS_RE='clash|wireguard|tailscale'
 
 setup() {
-  source_fns emit_fact has_fact join_by_semicolon scan_app_config_paths terminal_app_name tcc_recovery_hint report_app_scan_access print_app_scan_denied print_app_scan_denied_paths request_app_scan_access
+  source_fns emit_fact has_fact join_by_semicolon scan_app_config_paths terminal_app_name tcc_recovery_hint report_app_scan_access print_app_scan_denied print_app_scan_denied_paths request_app_scan_access info warn ok
+  # Цвета отключены, чтобы проверять чистый текст.
+  BOLD="" CYAN="" GREEN="" YELLOW="" RED="" MAGENTA="" DETAIL="" RESET=""
   # Однострочные определения из скрипта extract_fn не вытащит — дублируем.
   add_coverage_gap() { COVERAGE_GAPS+=("$1"); }
   APP_SCAN_PRUNE_NAMES=('com.apple.*' AddressBook Calendars CallHistoryDB CallHistoryTransactions CloudDocs FaceTime Knowledge Mail Messages MobileSync Safari)
