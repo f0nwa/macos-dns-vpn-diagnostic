@@ -4,10 +4,10 @@
 
 <p align="center">
   <a href="https://github.com/f0nwa/macos-dns-vpn-diagnostic/actions/workflows/ci.yml"><img src="https://github.com/f0nwa/macos-dns-vpn-diagnostic/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License: MIT"></a>
-  <a href="#требования"><img src="https://img.shields.io/badge/platform-macOS-black.svg?style=flat-square" alt="Platform: macOS"></a>
-  <a href="macos-dns-test.sh"><img src="https://img.shields.io/badge/shell-bash_3.2+-4EAA25.svg?style=flat-square&logo=gnubash&logoColor=white" alt="Shell: Bash 3.2+"></a>
-  <a href=".github/workflows/ci.yml"><img src="https://img.shields.io/badge/linted-shellcheck-yellow.svg?style=flat-square" alt="Linted with ShellCheck"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="#требования"><img src="https://img.shields.io/badge/platform-macOS-black.svg" alt="Platform: macOS"></a>
+  <a href="macos-dns-test.sh"><img src="https://img.shields.io/badge/shell-bash_3.2+-4EAA25.svg?logo=gnubash&logoColor=white" alt="Shell: Bash 3.2+"></a>
+  <a href=".github/workflows/ci.yml"><img src="https://img.shields.io/badge/linted-shellcheck-yellow.svg" alt="Linted with ShellCheck"></a>
 </p>
 
 **`macos-dns-test.sh`** — скрипт для диагностики DNS, VPN/прокси и сетевой фильтрации на macOS. Он снимает полный сетевой срез, проверяет домен по каждому пути резолвинга и сквозным запросом, а затем называет наиболее вероятную причину и слой, на котором ломается доступ. Результат — текстовый отчёт, который можно сразу отправить в поддержку.
