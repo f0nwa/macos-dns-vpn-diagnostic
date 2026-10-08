@@ -19,6 +19,7 @@
 - [Требования](#требования)
 - [Флаги](#флаги)
 - [Для контрибьюторов](#для-контрибьюторов)
+- [English](#english)
 
 ## Быстрый старт
 
@@ -46,6 +47,8 @@ bash /tmp/macos-dns-test.sh
 4. На шаге `7/12` macOS может не пустить скрипт в часть папок `~/Library`. Тогда он покажет эти папки и предложит выдать доступ — подробнее в разделе [«Доступ к папкам и приватность»](#доступ-к-папкам-и-приватность).
 5. В конце покажет блок «Результат проверки» (вердикт, возможные проблемы, заметки), путь к отчёту и откроет Finder с выделенным файлом — его можно сразу перетащить в мессенджер или письмо.
 6. Если «Полный доступ к диску» для терминала был выдан во время этого запуска, скрипт напомнит выключить его обратно.
+
+Язык интерфейса и отчёта выбирается по языку macOS: русский или английский. Принудительно: `DNS_DIAG_LANG=en` или `DNS_DIAG_LANG=ru` перед командой запуска.
 
 > [!WARNING]
 > **Перед отправкой отчёта** просмотрите его: там есть внутренние IP, имена хостов, пути и фрагменты системных логов.
@@ -152,7 +155,7 @@ HUMAN_STATUS=ТЕСТ ЧАСТИЧНО ПРОЙДЕН: хост доступен
 
 ### Тесты и линтинг
 
-Тесты на [bats-core](https://github.com/bats-core/bats-core) лежат в `tests/`. Они берут функции прямо из `macos-dns-test.sh` (`tests/lib/extract.bash`), поэтому всегда проверяют актуальный код.
+Тесты идут с русским интерфейсом (`DNS_DIAG_LANG=ru` задаётся в `tests/lib/extract.bash`); английский проверяет `i18n.bats`. Тесты на [bats-core](https://github.com/bats-core/bats-core) лежат в `tests/`. Они берут функции прямо из `macos-dns-test.sh` (`tests/lib/extract.bash`), поэтому всегда проверяют актуальный код.
 
 ```bash
 brew install bats-core shellcheck bash
@@ -175,6 +178,7 @@ bats tests/*.bats
 | `report_capture.bats` | `tcpdump` не дописывает пакеты в отчёт после таймаута |
 | `spinner.bats` | спиннер не зависает и не печатает предупреждения bash 3.2 |
 | `reveal_report.bats` | открытие Finder с отчётом и случаи, когда этого делать нельзя |
+| `i18n.bats` | выбор языка, английская справка и отсутствие кириллицы в английском прогоне |
 
 CI (`.github/workflows/ci.yml`) запускает ShellCheck и все тесты на `macos-latest` при каждом push и PR.
 
@@ -184,11 +188,97 @@ CI (`.github/workflows/ci.yml`) запускает ShellCheck и все тест
 ./scripts/install-git-hooks.sh
 ```
 
-Хук `.githooks/pre-commit` при коммите `macos-dns-test.sh` обновляет дату в `# Last Modified:` и пересчитывает `checksums.txt`.
+Хук `.githooks/pre-commit` при коммите `macos-dns-test.sh` обновляет дату в `# Last Modified:` и в `SCRIPT_VERSION`, а также пересчитывает `checksums.txt`.
 
 `--verify-integrity` хэширует скрипт и сверяет результат с `checksums.txt` — это защищает локальный клон от случайной порчи. Флаг работает только если рядом со скриптом лежит `scripts/integrity-lib.sh`, то есть не при запуске через `curl`. Для защиты от подмены при скачивании `integrity-lib.sh` поддерживает подпись `minisign` (`VERIFY_MODE=strict` + `DNS_DIAG_MINISIGN_PUBKEY`), но ключи подписи в репозитории пока не заведены.
 
 </details>
+
+## English
+
+**`macos-dns-test.sh`** is a script for diagnosing DNS, VPN/proxy and network filtering problems on macOS. It takes a full network snapshot, checks a domain along every resolution path and with an end-to-end request, then names the most likely cause and the layer where access breaks. The result is a text report you can send straight to support.
+
+The interface and the report follow the macOS language (Russian or English). To force one, set `DNS_DIAG_LANG=en` or `DNS_DIAG_LANG=ru` before the command.
+
+### Quick start
+
+```bash
+DNS_DIAG_LANG=en bash <(curl -fsSL "https://raw.githubusercontent.com/f0nwa/macos-dns-vpn-diagnostic/main/macos-dns-test.sh")
+```
+
+(`DNS_DIAG_LANG=en` is optional: on an English macOS it is picked automatically.) From a local clone: `./macos-dns-test.sh`.
+
+What happens:
+
+1. The script asks for the domain to check, in Latin or Cyrillic letters, in the `name.zone` format.
+2. It explains why an administrator password is needed (characters are not shown while you type; this is normal) and asks for it: some checks need `sudo`.
+3. For a Cyrillic (IDN) domain `python3` is required. If it is missing, the script offers to install `Homebrew + python3` or to enter the punycode form by hand.
+4. On step `7/12` macOS may deny access to some `~/Library` folders. The script then lists them and offers to grant access (see [Folder access and privacy](#folder-access-and-privacy)).
+5. At the end it prints a "Check result" block (verdict, possible problems, notes) and the report path, and opens Finder with the report highlighted, ready to drag into a messenger or an email.
+6. If Full Disk Access for the terminal was granted during this run, the script reminds you to turn it off again.
+
+> [!WARNING]
+> **Review the report before sending it**: it contains internal IP addresses, host names, paths and fragments of system logs.
+
+### What you get
+
+The report `<user>_<host>_dns_diag_<YYYYMMDD_HHMMSS>.txt` is written to the current folder. Start with the summary sections: `E2E_RESULT` (resolve, connect, TLS, HTTP phases), `PRIMARY_CLASSIFICATION` with `MOST_LIKELY_LAYER`, `EXEC_SUMMARY`, then `DNS_ONLY_RESULT`, `EVIDENCE_MATRIX` (every hypothesis with evidence, confidence and the next check), "Possible causes of DNS problems" and "For your information (not problems)": things that look suspicious but are not (for example NXDOMAIN from a local DNS under split DNS through a VPN). If a check could not be completed, the report ends with a **REPORT INCOMPLETE** block explaining why.
+
+### How it works
+
+- **System snapshot (steps 1-10).** DNS and proxy settings (`scutil`, `networksetup`), the PF firewall with all anchors, network extensions and VPN/proxy processes, launchd services, local port listeners, a short DNS traffic capture, `mDNSResponder`/NetworkExtension logs.
+- **DNS servers and routes (step 11).** The domain is checked through every DNS server found (`scutil`, `networksetup`, `/etc/resolv.conf`) and through the system resolver. The default route, the routing table and the `utun` interfaces are recorded.
+- **VPN paths, external resolvers and e2e (step 12).** The domain is checked through the scoped resolvers of every interface including VPN (`utun`), taking `/etc/resolver` and `/etc/hosts` into account. Then through the independent Cloudflare and Google resolvers (UDP-53, TCP-53, DoH), comparing their answers with the system ones, so you can see whether DNS is broken or spoofed locally, the domain is blocked from outside, or only port 53 is filtered. Finally `curl` walks the whole chain: resolve → connect → TLS → HTTP.
+- **Verdict.** The facts become hypotheses with a confidence level (HIGH/MED/LOW) per layer: resolver, tunnel, route, PF policy, traffic interceptor, TLS, external network.
+
+Beyond the usual checks the script finds PF routing bypasses (`route-to`, `rdr`, `divert-to` in every anchor, including nested `com.apple/*`), DPI bypass tools (ZapretMac, zapret, SpoofDPI, ByeDPI) and tells a running tool from a merely installed one, and recognises split DNS, where other servers failing to resolve a VPN-only domain is not a problem.
+
+### Folder access and privacy
+
+**What is read.** The script collects a lot of system information: network settings, services, processes, firewall rules, system logs. On step `7/12` it looks for VPN/proxy app configs in `~/Library` **by folder names only**: file contents are not read, Apple folders (`com.apple.*`) and personal data folders (Contacts, Calendars, Mail and so on) are skipped.
+
+**If macOS denies access to a folder.** Some `~/Library` folders (for example `Application Support/FileProvider`, `Caches/CloudKit`) are closed without any prompt and can only be opened through Full Disk Access. The script then lists the folders, offers to open System Settings > Privacy & Security > Full Disk Access, asks you to enable `Terminal` (if it is not listed: `+` > Applications > Utilities > Terminal) and press Enter, repeats the search, and at the end reminds you to turn Full Disk Access off again: it is only needed while the script runs.
+
+> [!TIP]
+> If macOS offers to quit Terminal, choose **"Later"**, otherwise the diagnostics are interrupted. If access does not take effect immediately, restart Terminal and run the script again.
+
+Granting access is optional: the diagnostics continue and step `7/12` is marked incomplete in the console and in the report (`APP_CONFIG_SCAN_ACCESS` and the REPORT INCOMPLETE block). Reset permissions granted to Terminal earlier: `tccutil reset All com.apple.Terminal`.
+
+**External requests.** By default the script contacts public Cloudflare (`1.1.1.1`, `cloudflare-dns.com`) and Google (`8.8.8.8`, `dns.google`) services for independent resolution checks. Disable with `--no-external-dns`.
+
+### Requirements
+
+| Component | | Notes |
+| --- | --- | --- |
+| macOS | required | tested on macOS Tahoe 26 |
+| `bash` | required | the system `/bin/bash` 3.2 is enough |
+| `sudo` | required | some checks need administrator rights |
+| `dig` | recommended | `nslookup` is used without it |
+| `python3` | optional | for Cyrillic (IDN) domains |
+| `brew` | optional | the script can install it after confirmation |
+
+### Flags
+
+Without flags the script is interactive. For automation:
+
+```bash
+./macos-dns-test.sh --domain=example.com --yes --output=/tmp/report.txt
+```
+
+| Flag | Purpose |
+| --- | --- |
+| `--domain=<host>` | do not ask for the domain |
+| `--yes` | answer "yes" to every question (including installing Homebrew/python3) and skip the folder-access questions |
+| `--output=<path>` | report path instead of `./<user>_<host>_dns_diag_<ts>.txt` |
+| `--no-external-dns` | do not contact external DNS/DoH (Cloudflare, Google) |
+| `--no-open` | do not open Finder with the report when finished |
+| `--verify-integrity` | compare the script's sha256 with `checksums.txt` before running (local clone only) |
+
+Environment variables: `DNS_DIAG_LANG=en|ru` forces the interface language; `NO_COLOR=1` turns colors off. Without an interactive terminal and in CI the script does not offer folder access and does not open Finder.
+
+### Contributing
+
+Tests use [bats-core](https://github.com/bats-core/bats-core) and live in `tests/` (they run with the Russian interface, `i18n.bats` covers English). Lint and test with `shellcheck -S warning macos-dns-test.sh scripts/*.sh` and `bats tests/*.bats`; run bats under bash from Homebrew (the system bash 3.2 cannot find tests with Cyrillic names). Install the git hook with `./scripts/install-git-hooks.sh`: on commit it updates `# Last Modified:`, `SCRIPT_VERSION` and `checksums.txt`. Every user-facing string goes through `tx "english" "русский"`; `i18n.bats` fails when a string is left untranslated.
 
 ## Лицензия
 

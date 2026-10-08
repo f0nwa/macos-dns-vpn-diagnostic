@@ -40,6 +40,6 @@ exit 0
 INSTALLER
 }
 # Сохраняем порядок выполнения из основного скрипта, включая вызов sudo.
-eval "$(sed -n '/^TEST_DOMAIN=""$/,/^say_step "1\/12/{ /^say_step "1\/12/d; p; }' "$SCRIPT_UNDER_TEST")" 3<<< ''
+eval "$(sed -n '/^TEST_DOMAIN=""$/,/^say_step "\$(tx "1\/12/{ /^say_step "\$(tx "1\/12/d; p; }' "$SCRIPT_UNDER_TEST")" 3<<< ''
 
 [ "$BREW_INSTALL_RESULT" = success ] || { echo "Ошибка: установщик запущен без sudo-сессии" >&2; exit 1; }
