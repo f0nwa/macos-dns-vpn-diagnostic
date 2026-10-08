@@ -146,7 +146,7 @@ HUMAN_STATUS=ТЕСТ ЧАСТИЧНО ПРОЙДЕН: хост доступен
 | `--no-open` | не открывать Finder с отчётом после завершения |
 | `--verify-integrity` | перед запуском сверить sha256 скрипта с `checksums.txt` (только из локального клона, см. ниже) |
 
-Без интерактивного терминала и в CI скрипт не предлагает выдать доступ к папкам и не открывает Finder. Цвета и анимацию отключает вывод не в терминал, а цвета — ещё и переменная `NO_COLOR=1`.
+Без интерактивного терминала и в CI скрипт не предлагает выдать доступ к папкам и не открывает Finder. Цвета и анимацию отключает вывод не в терминал, а цвета — ещё и переменная `NO_COLOR=1`. Цвет подсказок подбирается под фон терминала (на тёмном — яркий белый); если определение не сработало, задайте `DNS_DIAG_BG=dark` или `DNS_DIAG_BG=light`.
 
 ## Для контрибьюторов
 
@@ -178,6 +178,7 @@ bats tests/*.bats
 | `report_capture.bats` | `tcpdump` не дописывает пакеты в отчёт после таймаута |
 | `spinner.bats` | спиннер не зависает и не печатает предупреждения bash 3.2 |
 | `reveal_report.bats` | открытие Finder с отчётом и случаи, когда этого делать нельзя |
+| `detail_color.bats` | выбор цвета подсказок по фону терминала |
 | `i18n.bats` | выбор языка, английская справка и отсутствие кириллицы в английском прогоне |
 
 CI (`.github/workflows/ci.yml`) запускает ShellCheck и все тесты на `macos-latest` при каждом push и PR.
@@ -274,7 +275,7 @@ Without flags the script is interactive. For automation:
 | `--no-open` | do not open Finder with the report when finished |
 | `--verify-integrity` | compare the script's sha256 with `checksums.txt` before running (local clone only) |
 
-Environment variables: `DNS_DIAG_LANG=en|ru` forces the interface language; `NO_COLOR=1` turns colors off. Without an interactive terminal and in CI the script does not offer folder access and does not open Finder.
+Environment variables: `DNS_DIAG_LANG=en|ru` forces the interface language; `NO_COLOR=1` turns colors off; `DNS_DIAG_BG=dark|light` sets the terminal background if auto-detection fails (hints are bright white on dark backgrounds). Without an interactive terminal and in CI the script does not offer folder access and does not open Finder.
 
 ### Contributing
 

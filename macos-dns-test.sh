@@ -114,8 +114,43 @@ if [ -t 1 ]; then
   clear
 fi
 
-# Цвета только в терминале и без NO_COLOR (https://no-color.org).
 ESC=$'\033'
+
+# Тёмный ли фон терминала по ответу на запрос OSC 11: «ESC ] 11 ; rgb:RRRR/GGGG/BBBB ST».
+bg_reply_is_dark() {
+  local rgb r g b
+  rgb="$(printf '%s' "$1" | sed -n 's/.*rgb:\([0-9a-fA-F]*\)\/\([0-9a-fA-F]*\)\/\([0-9a-fA-F]*\).*/\1 \2 \3/p')"
+  [ -n "$rgb" ] || return 1
+  read -r r g b <<< "$rgb"
+  # Компонента может быть из 1-4 hex-цифр: берём старший байт.
+  [ "${#r}" -eq 1 ] && r="$r$r"
+  [ "${#g}" -eq 1 ] && g="$g$g"
+  [ "${#b}" -eq 1 ] && b="$b$b"
+  r=$((16#${r:0:2}))
+  g=$((16#${g:0:2}))
+  b=$((16#${b:0:2}))
+  [ $(( (299 * r + 587 * g + 114 * b) / 1000 )) -lt 128 ]
+}
+
+# Цвет подсказок и описаний. Серый (ANSI 90) на тёмных темах не виден, а «цвет по
+# умолчанию» зависит от темы, поэтому на тёмном фоне берём яркий белый, на светлом
+# и если терминал не ответил — цвет по умолчанию. DNS_DIAG_BG=dark|light пропускает запрос.
+detail_color() {
+  local bg="${DNS_DIAG_BG:-}" saved="" reply=""
+  if [ -z "$bg" ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    saved="$(stty -g </dev/tty 2>/dev/null)" || saved=""
+    if [ -n "$saved" ] && stty -echo -icanon min 0 time 2 </dev/tty 2>/dev/null; then
+      printf '%s]11;?%s\\' "$ESC" "$ESC" >/dev/tty
+      reply="$(dd bs=64 count=1 </dev/tty 2>/dev/null)"
+      stty "$saved" </dev/tty 2>/dev/null
+      bg_reply_is_dark "$reply" && bg=dark
+    fi
+  fi
+  [ "$bg" = "dark" ] && printf '%s[97m' "$ESC"
+  return 0
+}
+
+# Цвета только в терминале и без NO_COLOR (https://no-color.org).
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   BOLD="${ESC}[1m"
   CYAN="${ESC}[36m"
@@ -123,9 +158,8 @@ if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   YELLOW="${ESC}[33m"
   RED="${ESC}[31m"
   MAGENTA="${ESC}[35m"
-  # Детали выводим обычным цветом текста: серый (ANSI 90) на тёмных темах терминала не виден.
-  DETAIL=""
   RESET="${ESC}[0m"
+  DETAIL="$(detail_color)"
 else
   BOLD="" CYAN="" GREEN="" YELLOW="" RED="" MAGENTA="" DETAIL="" RESET=""
 fi
